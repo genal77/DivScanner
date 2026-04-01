@@ -348,75 +348,67 @@ def build_figure(
     active_signals     = []   # (color, label) for banner
     active_signal_data = []   # full dicts for alert system
 
-    if show_divergences:
-        low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
-        for data in (low_data, high_data):
-            if data:
+    if show_divergences and not price_df.empty and not cvd_spot_df.empty:
+        merged = pd.merge(
+            price_df[["timestamp", "high", "low"]].rename(
+                columns={"high": "p_high", "low": "p_low"}
+            ),
+            cvd_spot_df[["timestamp", "cvd_high", "cvd_low"]],
+            on="timestamp", how="inner",
+        ).reset_index(drop=True)
+
+        if len(merged) >= PIVOT_WINDOW * 2 + 2:
+            p_lows, p_highs = find_pivot_indices(merged["p_low"])
+            curr = len(merged) - 1
+
+            def draw_line(x0, y0, x1, y1, color, dash, width, row):
+                fig.add_shape(
+                    type="line", x0=x0, y0=y0, x1=x1, y1=y1,
+                    line=dict(color=color, width=width, dash=dash),
+                    row=row, col=1,
+                )
+
+            # Historical low divergences (always drawn)
+            for i in range(1, len(p_lows)):
+                p1, p2 = p_lows[i - 1], p_lows[i]
+                pdif = merged["p_low"].iloc[p2]   - merged["p_low"].iloc[p1]
+                cdif = merged["cvd_low"].iloc[p2] - merged["cvd_low"].iloc[p1]
+                if   pdif < 0 and cdif > 0: color, dash = "cyan", "dash"
+                elif pdif > 0 and cdif < 0: color, dash = "cyan", "solid"
+                else: continue
+                t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
+                draw_line(t0, merged["p_low"].iloc[p1],   t1, merged["p_low"].iloc[p2],   color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_low"].iloc[p1], t1, merged["cvd_low"].iloc[p2], color, dash, 1.5, 2)
+
+            # Historical high divergences (always drawn)
+            for i in range(1, len(p_highs)):
+                p1, p2 = p_highs[i - 1], p_highs[i]
+                pdif = merged["p_high"].iloc[p2]    - merged["p_high"].iloc[p1]
+                cdif = merged["cvd_high"].iloc[p2]  - merged["cvd_high"].iloc[p1]
+                if   pdif > 0 and cdif < 0: color, dash = "magenta", "dash"
+                elif pdif < 0 and cdif > 0: color, dash = "magenta", "solid"
+                else: continue
+                t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
+                draw_line(t0, merged["p_high"].iloc[p1],   t1, merged["p_high"].iloc[p2],   color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_high"].iloc[p1], t1, merged["cvd_high"].iloc[p2], color, dash, 1.5, 2)
+
+            # Live signal — current candle vs last confirmed pivot
+            low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
+            for data in (low_data, high_data):
+                if not data:
+                    continue
                 color = "cyan" if "SELLER" in data["signal"] else "magenta"
+                dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
+                is_low = "SELLER" in data["signal"]
+                p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
+                pivots = p_lows if is_low else p_highs
+                if pivots:
+                    last_p = pivots[-1]
+                    t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
+                    draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
+                    draw_line(t0, merged[c_col].iloc[last_p], t1, merged[c_col].iloc[curr], color, dash, 3, 2)
                 active_signals.append((color, f"SPOT · {data['signal']}"))
                 active_signal_data.append(data)
-
-                # Draw divergence lines on price panel (1) and CVD panel (2)
-                sig = data["signal"]
-                line_color = "cyan" if "SELLER" in sig else "magenta"
-                line_dash  = "dash" if "EXHAUSTION" in sig else "solid"
-
-                is_low = "SELLER" in sig
-                p_col  = "p_low"  if is_low else "p_high"
-                c_col  = "cvd_low" if is_low else "cvd_high"
-
-                # Re-merge to get timestamps for drawing
-                if not price_df.empty and not cvd_spot_df.empty:
-                    merged = pd.merge(
-                        price_df[["timestamp", "high", "low"]].rename(
-                            columns={"high": "p_high", "low": "p_low"}
-                        ),
-                        cvd_spot_df[["timestamp", "cvd_high", "cvd_low"]],
-                        on="timestamp", how="inner",
-                    ).reset_index(drop=True)
-
-                    p_lows, p_highs = find_pivot_indices(merged["p_low"])
-                    pivots = p_lows if is_low else p_highs
-
-                    # Historical lines
-                    for i in range(1, len(pivots)):
-                        p1, p2  = pivots[i - 1], pivots[i]
-                        pdif    = merged[p_col].iloc[p2]  - merged[p_col].iloc[p1]
-                        cdif    = merged[c_col].iloc[p2]  - merged[c_col].iloc[p1]
-                        if is_low:
-                            match = (pdif < 0 and cdif > 0) or (pdif > 0 and cdif < 0)
-                            h_color = "cyan"
-                            h_dash  = "dash" if (pdif < 0 and cdif > 0) else "solid"
-                        else:
-                            match = (pdif > 0 and cdif < 0) or (pdif < 0 and cdif > 0)
-                            h_color = "magenta"
-                            h_dash  = "dash" if (pdif > 0 and cdif < 0) else "solid"
-                        if not match:
-                            continue
-                        t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                        for row, col in [(1, p_col), (2, c_col)]:
-                            fig.add_shape(
-                                type="line",
-                                x0=t0, y0=merged[col].iloc[p1],
-                                x1=t1, y1=merged[col].iloc[p2],
-                                line=dict(color=h_color, width=1.5, dash=h_dash),
-                                row=row, col=1,
-                            )
-
-                    # Live signal line
-                    curr   = len(merged) - 1
-                    pivots_list = p_lows if is_low else p_highs
-                    if pivots_list:
-                        last_p = pivots_list[-1]
-                        t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
-                        for row, col in [(1, p_col), (2, c_col)]:
-                            fig.add_shape(
-                                type="line",
-                                x0=t0, y0=merged[col].iloc[last_p],
-                                x1=t1, y1=merged[col].iloc[curr],
-                                line=dict(color=line_color, width=3, dash=line_dash),
-                                row=row, col=1,
-                            )
 
         # CVD Futures divergences disabled — futures data still accumulating
 
