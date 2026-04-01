@@ -1,0 +1,21 @@
+services:
+
+  collector:
+    build: .
+    command: python3 collector.py
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+
+  app:
+    build: .
+    command: python3 app.py
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - collector
