@@ -60,6 +60,22 @@ INTERVAL_MAP = {
 REFRESH_MS = 10_000      # 10 seconds
 DISPLAY_CANDLES = 200   # candles shown per timeframe (same visual density on all TFs)
 
+# Candle duration per interval (seconds) — used for x-axis right padding
+INTERVAL_SECONDS = {
+    "5m":  5 * 60,
+    "15m": 15 * 60,
+    "30m": 30 * 60,
+    "1h":  60 * 60,
+}
+
+# X-axis tick spacing per interval (milliseconds) — larger TF = wider tick spacing
+DTICK_MS = {
+    "5m":  2 * 3_600_000,   # tick every 2h
+    "15m": 4 * 3_600_000,   # tick every 4h
+    "30m": 6 * 3_600_000,   # tick every 6h
+    "1h":  12 * 3_600_000,  # tick every 12h
+}
+
 # ---------------------------------------------------------------------------
 # DATA LOADING
 # ---------------------------------------------------------------------------
@@ -327,14 +343,17 @@ def build_figure(
     cvd_futures_df: pd.DataFrame,
     oi_df:          pd.DataFrame,
     show_divergences: bool = True,
+    interval_str: str = "15m",
 ) -> go.Figure:
     """Assemble the 4-panel Plotly figure."""
 
+    # Row heights: price=70vh, each CVD/OI panel=30vh relative to 160vh total
+    # => 70/160=0.4375, 30/160=0.1875 each
     fig = make_subplots(
         rows=4, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.40, 0.20, 0.20, 0.20],
+        vertical_spacing=0.004,
+        row_heights=[0.4375, 0.1875, 0.1875, 0.1875],
     )
 
     def candlestick(df, x, o, h, l, c, name, row):
@@ -349,6 +368,27 @@ def build_figure(
     # Panel 1 — Price
     if not price_df.empty:
         candlestick(price_df, "timestamp", "open", "high", "low", "close", "BTC/USDT", 1)
+
+        # Current price: horizontal dashed line + label on the right y-axis
+        last_price = price_df["close"].iloc[-1]
+        fig.add_hline(
+            y=last_price,
+            line_dash="dot",
+            line_color="rgba(255,255,255,0.35)",
+            line_width=1,
+            row=1, col=1,
+        )
+        fig.add_annotation(
+            x=1, xref="paper",
+            y=last_price, yref="y",
+            text=f"<b>{last_price:,.2f}</b>",
+            showarrow=False,
+            font=dict(size=10, color="white"),
+            bgcolor="rgba(40,40,40,0.92)",
+            bordercolor="rgba(255,255,255,0.25)",
+            borderpad=4,
+            xanchor="left",
+        )
 
     # Panel 2 — CVD Spot
     if not cvd_spot_df.empty:
@@ -394,11 +434,15 @@ def build_figure(
         )
 
     # Panel labels (positioned in paper coordinates)
+    # Boundaries with row_heights=[0.4375,0.1875,0.1875,0.1875], vertical_spacing=0.004:
+    #   available_height = 1 - 3*0.004 = 0.988
+    #   row4: [0,       0.1853],  row3: [0.1893, 0.3746]
+    #   row2: [0.3786,  0.5639],  row1: [0.5679, 1.0   ]
     panel_labels = [
         (0.985, "BTC/USDT  ·  Binance Spot"),
-        (0.570, "CVD Spot  ·  Aggregated"),
-        (0.360, "CVD Futures  ·  Aggregated"),
-        (0.145, "Open Interest  ·  Binance Futures"),
+        (0.555, "CVD Spot  ·  Aggregated"),
+        (0.365, "CVD Futures  ·  Aggregated"),
+        (0.175, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
@@ -408,11 +452,28 @@ def build_figure(
             align="left", xanchor="left",
         )
 
+    # Subtle horizontal borders between panels (at panel boundaries in paper coords)
+    for border_y in [0.5639, 0.3746, 0.1853]:
+        fig.add_shape(
+            type="line",
+            x0=0, x1=1, y0=border_y, y1=border_y,
+            xref="paper", yref="paper",
+            line=dict(color="#2e2e2e", width=1),
+        )
+
+    # X-axis range: extend right by 10 empty candles for visual breathing room
+    if not price_df.empty:
+        candle_td = pd.Timedelta(seconds=INTERVAL_SECONDS.get(interval_str, 900))
+        x_min = price_df["timestamp"].iloc[0]
+        x_max = price_df["timestamp"].iloc[-1] + candle_td * 10
+        fig.update_xaxes(range=[x_min, x_max])
+
     # Axes
     fig.update_xaxes(
         rangeslider_visible=False,
         gridcolor="#1e1e1e",
         tickformat="%H:%M\n%d/%m",
+        dtick=DTICK_MS.get(interval_str, 7_200_000),
         showspikes=True,
         spikecolor="#555",
         spikethickness=1,
@@ -462,7 +523,7 @@ _CHECKLIST_LABEL = {"color": _TEXT, "marginRight": "10px", "fontSize": "12px"}
 _CHECKLIST_INPUT = {"marginRight": "4px", "accentColor": "#26a69a"}
 
 app.layout = html.Div(
-    style={"backgroundColor": _DARK, "height": "100vh", "display": "flex", "flexDirection": "column", "fontFamily": "system-ui, sans-serif"},
+    style={"backgroundColor": _DARK, "minHeight": "100vh", "display": "flex", "flexDirection": "column", "fontFamily": "system-ui, sans-serif"},
     children=[
 
         # ── Top controls bar ──────────────────────────────────────────────
@@ -532,7 +593,7 @@ app.layout = html.Div(
         # ── Chart ─────────────────────────────────────────────────────────
         dcc.Graph(
             id="main-chart",
-            style={"flex": "1", "minHeight": 0},
+            style={"height": "160vh"},
             config={"responsive": True, "displayModeBar": False},
         ),
 
@@ -576,7 +637,7 @@ def update_chart(_, interval_str, spot_selected, futures_selected):
     cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_selected or []), DISPLAY_CANDLES)
     oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),       DISPLAY_CANDLES)
 
-    fig = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df)
+    fig = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str=interval_str)
     now_str = "Updated " + datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
     return fig, now_str
