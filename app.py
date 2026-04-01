@@ -445,14 +445,6 @@ def build_figure(
             align="left", xanchor="left",
         )
 
-    # Horizontal borders between panels — center of each gap in paper coords
-    for border_y in [0.614, 0.406, 0.198]:
-        fig.add_shape(
-            type="line",
-            x0=0, x1=1, y0=border_y, y1=border_y,
-            xref="paper", yref="paper",
-            line=dict(color="#593434", width=2),
-        )
 
     # X-axis range: extend right by 10 empty candles for visual breathing room
     # Also compute dtick dynamically to target ~20 ticks across the visible range
