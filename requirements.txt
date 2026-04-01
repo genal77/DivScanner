@@ -3,5 +3,6 @@ pandas
 pyarrow
 plotly
 dash
+dash-auth
 kaleido
 python-dotenv

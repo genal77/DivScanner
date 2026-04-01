@@ -16,11 +16,16 @@ Run:   python3 app.py
 Open:  http://localhost:8050
 """
 
+import os
 import pandas as pd
 import dash
+import dash_auth
 from dash import dcc, html, Input, Output
 from pathlib import Path
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from analysis import (
     INTERVAL_MAP, DISPLAY_CANDLES,
@@ -41,6 +46,7 @@ REFRESH_MS = 10_000
 # ---------------------------------------------------------------------------
 
 app = dash.Dash(__name__, title="CVD Scanner · BTC/USDT")
+dash_auth.BasicAuth(app, {os.getenv("DASH_USER", "admin"): os.getenv("DASH_PASSWORD", "")})
 
 # Styles
 _DARK   = "#111"
