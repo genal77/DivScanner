@@ -1,6 +1,9 @@
 # Data files
 data/
 
+# Secrets
+.env
+
 # macOS
 .DS_Store
 

@@ -16,6 +16,10 @@ Run:   python app.py
 Open:  http://localhost:8050
 """
 
+import os
+import io
+import threading
+
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -23,7 +27,12 @@ import dash
 from dash import dcc, html, Input, Output
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+from dotenv import load_dotenv
+
+load_dotenv()
+_TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -59,6 +68,7 @@ INTERVAL_MAP = {
 
 REFRESH_MS = 10_000      # 10 seconds
 DISPLAY_CANDLES = 200   # candles shown per timeframe (same visual density on all TFs)
+ALERT_CANDLES   = 60    # candles shown in Telegram alert screenshot
 
 # Candle duration per interval (seconds) — used for x-axis right padding
 INTERVAL_SECONDS = {
@@ -223,7 +233,7 @@ def add_divergences(
     ind_low_col:  str,
     price_row:   int,
     ind_row:     int,
-) -> Tuple[str, str]:
+) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Detect divergences between price and an indicator (CVD or OI).
     Draws historical divergence lines on both the price panel and the indicator panel.
@@ -289,7 +299,8 @@ def add_divergences(
         draw_line(t0, merged[ind_high_col].iloc[p1], t1, merged[ind_high_col].iloc[p2], color, dash, 1.5, ind_row)
 
     # ── Live signal — current candle vs last confirmed pivot ─────────────
-    active_low, active_high = "", ""
+    low_data:  Optional[dict] = None
+    high_data: Optional[dict] = None
 
     # Check low: current candle is the lowest since last confirmed pivot low
     if p_lows:
@@ -298,13 +309,22 @@ def add_divergences(
         if not since_last.empty and since_last.min() == merged["p_low"].iloc[curr]:
             l_pdif = merged["p_low"].iloc[curr]      - merged["p_low"].iloc[last_l]
             l_cdif = merged[ind_low_col].iloc[curr]  - merged[ind_low_col].iloc[last_l]
+            active_low = ""
             if   l_pdif < 0 and l_cdif > 0: active_low = "SELLERS EXHAUSTION"
             elif l_pdif > 0 and l_cdif < 0: active_low = "SELLERS ABSORPTION"
             if active_low:
                 t0, t1 = merged["timestamp"].iloc[last_l], merged["timestamp"].iloc[curr]
                 lw = 3
-                draw_line(t0, merged["p_low"].iloc[last_l],      t1, merged["p_low"].iloc[curr],      "cyan", "dash" if "EXHAUSTION" in active_low else "solid", lw, price_row)
-                draw_line(t0, merged[ind_low_col].iloc[last_l],  t1, merged[ind_low_col].iloc[curr],  "cyan", "dash" if "EXHAUSTION" in active_low else "solid", lw, ind_row)
+                draw_line(t0, merged["p_low"].iloc[last_l],     t1, merged["p_low"].iloc[curr],     "cyan", "dash" if "EXHAUSTION" in active_low else "solid", lw, price_row)
+                draw_line(t0, merged[ind_low_col].iloc[last_l], t1, merged[ind_low_col].iloc[curr], "cyan", "dash" if "EXHAUSTION" in active_low else "solid", lw, ind_row)
+                low_data = {
+                    "signal":     active_low,
+                    "price_from": float(merged["p_low"].iloc[last_l]),
+                    "price_to":   float(merged["p_low"].iloc[curr]),
+                    "cvd_from":   float(merged[ind_low_col].iloc[last_l]),
+                    "cvd_to":     float(merged[ind_low_col].iloc[curr]),
+                    "timestamp":  merged["timestamp"].iloc[curr],
+                }
 
     # Check high: current candle is the highest since last confirmed pivot high
     if p_highs:
@@ -313,15 +333,24 @@ def add_divergences(
         if not since_last.empty and since_last.max() == merged["p_high"].iloc[curr]:
             h_pdif = merged["p_high"].iloc[curr]     - merged["p_high"].iloc[last_h]
             h_cdif = merged[ind_high_col].iloc[curr] - merged[ind_high_col].iloc[last_h]
+            active_high = ""
             if   h_pdif > 0 and h_cdif < 0: active_high = "BUYERS EXHAUSTION"
             elif h_pdif < 0 and h_cdif > 0: active_high = "BUYERS ABSORPTION"
             if active_high:
                 t0, t1 = merged["timestamp"].iloc[last_h], merged["timestamp"].iloc[curr]
                 lw = 3
-                draw_line(t0, merged["p_high"].iloc[last_h],     t1, merged["p_high"].iloc[curr],     "magenta", "dash" if "EXHAUSTION" in active_high else "solid",   lw, price_row)
-                draw_line(t0, merged[ind_high_col].iloc[last_h], t1, merged[ind_high_col].iloc[curr], "magenta", "dash" if "EXHAUSTION" in active_high else "solid",   lw, ind_row)
+                draw_line(t0, merged["p_high"].iloc[last_h],     t1, merged["p_high"].iloc[curr],     "magenta", "dash" if "EXHAUSTION" in active_high else "solid", lw, price_row)
+                draw_line(t0, merged[ind_high_col].iloc[last_h], t1, merged[ind_high_col].iloc[curr], "magenta", "dash" if "EXHAUSTION" in active_high else "solid", lw, ind_row)
+                high_data = {
+                    "signal":     active_high,
+                    "price_from": float(merged["p_high"].iloc[last_h]),
+                    "price_to":   float(merged["p_high"].iloc[curr]),
+                    "cvd_from":   float(merged[ind_high_col].iloc[last_h]),
+                    "cvd_to":     float(merged[ind_high_col].iloc[curr]),
+                    "timestamp":  merged["timestamp"].iloc[curr],
+                }
 
-    return active_low, active_high
+    return low_data, high_data
 
 
 # ---------------------------------------------------------------------------
@@ -396,18 +425,21 @@ def build_figure(
         candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
 
     # ── Divergences ───────────────────────────────────────────────────────
-    active_signals = []  # collect live signals from all panels
+    active_signals     = []  # (color, label) pairs for banner
+    active_signal_data = []  # full dicts for alert system
 
     if show_divergences:
         # CVD Spot (panel 2) vs Price (panel 1)
-        low_sig, high_sig = add_divergences(
+        low_data, high_data = add_divergences(
             fig, price_df, cvd_spot_df,
             ind_high_col="cvd_high", ind_low_col="cvd_low",
             price_row=1, ind_row=2,
         )
-        for sig in (low_sig, high_sig):
-            if sig:
-                active_signals.append(("cyan" if "SELLER" in sig else "magenta", f"SPOT · {sig}"))
+        for data in (low_data, high_data):
+            if data:
+                color = "cyan" if "SELLER" in data["signal"] else "magenta"
+                active_signals.append((color, f"SPOT · {data['signal']}"))
+                active_signal_data.append(data)
 
         # CVD Futures divergences disabled — futures data still accumulating
 
@@ -488,7 +520,108 @@ def build_figure(
         hovermode="x unified",
     )
 
-    return fig
+    return fig, active_signal_data
+
+
+# ---------------------------------------------------------------------------
+# TELEGRAM ALERTS
+# ---------------------------------------------------------------------------
+
+_SIGNAL_EMOJI = {
+    "SELLERS EXHAUSTION": "🟢",
+    "SELLERS ABSORPTION": "🔵",
+    "BUYERS EXHAUSTION":  "🔴",
+    "BUYERS ABSORPTION":  "🟠",
+}
+
+# Tracks the timestamp of the last alerted candle per signal type (low / high)
+_last_alert: dict = {"low": None, "high": None}
+
+
+def _build_alert_image(
+    price_df:       pd.DataFrame,
+    cvd_spot_df:    pd.DataFrame,
+    cvd_futures_df: pd.DataFrame,
+    oi_df:          pd.DataFrame,
+    interval_str:   str,
+) -> Optional[bytes]:
+    """Render a 540×960 PNG (9:16) of the last ALERT_CANDLES for Telegram."""
+    try:
+        import kaleido  # noqa: F401
+    except ImportError:
+        return None
+
+    p  = trim_to_candles(price_df,       ALERT_CANDLES)
+    cs = trim_to_candles(cvd_spot_df,    ALERT_CANDLES)
+    cf = trim_to_candles(cvd_futures_df, ALERT_CANDLES)
+    oi = trim_to_candles(oi_df,          ALERT_CANDLES)
+
+    fig, _ = build_figure(p, cs, cf, oi, interval_str=interval_str)
+    fig.update_layout(margin=dict(l=0, r=55, t=8, b=25))
+
+    return fig.to_image(format="png", width=540, height=960)
+
+
+def _send_telegram(signal_data: dict, interval_str: str, current_price: float, image_bytes: Optional[bytes]) -> None:
+    """Format message and send photo (or text) to Telegram."""
+    if not _TELEGRAM_TOKEN or not _TELEGRAM_CHAT_ID:
+        return
+
+    sig    = signal_data["signal"]
+    emoji  = _SIGNAL_EMOJI.get(sig, "⚪")
+    p_from = signal_data["price_from"]
+    p_to   = signal_data["price_to"]
+    c_from = signal_data["cvd_from"]
+    c_to   = signal_data["cvd_to"]
+    ts     = signal_data["timestamp"]
+
+    p_arrow = "↑" if p_to >= p_from else "↓"
+    c_arrow = "↑" if c_to >= c_from else "↓"
+    p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
+    c_delta = c_to - c_from
+    ts_str  = pd.Timestamp(ts).strftime("%H:%M UTC")
+
+    text = (
+        f"{emoji} <b>{sig}</b> [{interval_str}]\n\n"
+        f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f} ({p_pct:+.2f}%)\n"
+        f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f} ({c_delta:+,.0f})\n\n"
+        f"BTC/USDT @ {current_price:,.2f}\n"
+        f"{ts_str}"
+    )
+
+    base = f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}"
+    try:
+        if image_bytes:
+            import requests as _req
+            _req.post(
+                f"{base}/sendPhoto",
+                data={"chat_id": _TELEGRAM_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                files={"photo": ("alert.png", image_bytes, "image/png")},
+                timeout=20,
+            )
+        else:
+            import requests as _req
+            _req.post(
+                f"{base}/sendMessage",
+                json={"chat_id": _TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+    except Exception:
+        pass  # never crash the app on alert failure
+
+
+def _alert_worker(
+    signal_data:    dict,
+    price_df:       pd.DataFrame,
+    cvd_spot_df:    pd.DataFrame,
+    cvd_futures_df: pd.DataFrame,
+    oi_df:          pd.DataFrame,
+    interval_str:   str,
+) -> None:
+    """Background thread: render image then send Telegram alert."""
+    image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str)
+    current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
+    _send_telegram(signal_data, interval_str, current_price, image_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +762,20 @@ def update_chart(_, interval_str, spot_selected, futures_selected):
     cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_selected or []), DISPLAY_CANDLES)
     oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),       DISPLAY_CANDLES)
 
-    fig = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str=interval_str)
+    fig, active_signal_data = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str=interval_str)
+
+    # Telegram alerts — fire once per candle close that carries an active signal
+    for signal_data in active_signal_data:
+        key = "low" if "SELLER" in signal_data["signal"] else "high"
+        ts  = signal_data["timestamp"]
+        if ts != _last_alert[key]:
+            _last_alert[key] = ts
+            threading.Thread(
+                target=_alert_worker,
+                args=(signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str),
+                daemon=True,
+            ).start()
+
     now_str = "Updated " + datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
     return fig, now_str
