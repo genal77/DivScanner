@@ -20,6 +20,10 @@ Futures exchanges:
 OI: binance_futures (polled every 60s, backfilled via 5m historical endpoint)
 """
 
+import json
+import os
+import threading
+
 import requests
 import pandas as pd
 import time
@@ -27,6 +31,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+_TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -695,6 +704,186 @@ def run_backfill() -> None:
 
 
 # ---------------------------------------------------------------------------
+# DIVERGENCE ALERTS
+# ---------------------------------------------------------------------------
+
+# TFs to check for divergences on every collection cycle
+ALERT_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
+
+# State file — persists last-alerted candle timestamps across restarts
+ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
+
+_SIGNAL_EMOJI = {
+    "SELLERS EXHAUSTION": "🟢",
+    "SELLERS ABSORPTION": "🔵",
+    "BUYERS EXHAUSTION":  "🔴",
+    "BUYERS ABSORPTION":  "🟠",
+}
+
+# All spot exchanges used for CVD aggregation (mirrors app.py default)
+_ALL_SPOT_EXCHANGES = [
+    "binance", "mexc", "bybit_spot", "okx_spot",
+    "gate_spot", "coinbase", "kraken",
+]
+
+
+def _load_alert_state() -> dict:
+    """Load persisted alert state from disk. Returns empty state if not found."""
+    if ALERT_STATE_FILE.exists():
+        try:
+            return json.loads(ALERT_STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {tf: {"low": None, "high": None} for tf in ALERT_TIMEFRAMES}
+
+
+def _save_alert_state(state: dict) -> None:
+    """Persist alert state to disk."""
+    try:
+        ALERT_STATE_FILE.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def _format_alert_message(signal_data: dict, interval_str: str, current_price: float) -> str:
+    """Format Telegram message text for a divergence alert."""
+    sig    = signal_data["signal"]
+    emoji  = _SIGNAL_EMOJI.get(sig, "⚪")
+    p_from = signal_data["price_from"]
+    p_to   = signal_data["price_to"]
+    c_from = signal_data["cvd_from"]
+    c_to   = signal_data["cvd_to"]
+    ts     = signal_data["timestamp"]
+
+    p_arrow = "↑" if p_to >= p_from else "↓"
+    c_arrow = "↑" if c_to >= c_from else "↓"
+    p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
+    c_delta = c_to - c_from
+    ts_str  = pd.Timestamp(ts).strftime("%H:%M UTC")
+
+    return (
+        f"{emoji} <b>{sig}</b> [{interval_str}]\n\n"
+        f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f} ({p_pct:+.2f}%)\n"
+        f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f} ({c_delta:+,.0f})\n\n"
+        f"BTC/USDT @ {current_price:,.2f}\n"
+        f"{ts_str}"
+    )
+
+
+def _build_alert_image(
+    price_df: pd.DataFrame,
+    cvd_spot_df: pd.DataFrame,
+    cvd_futures_df: pd.DataFrame,
+    oi_df: pd.DataFrame,
+    interval_str: str,
+) -> Optional[bytes]:
+    """Render 540×960 PNG (9:16) of the last ALERT_CANDLES. Returns None if kaleido missing."""
+    try:
+        import kaleido  # noqa: F401
+        from analysis import build_figure, trim_to_candles, ALERT_CANDLES
+    except ImportError:
+        return None
+
+    p  = trim_to_candles(price_df,       ALERT_CANDLES)
+    cs = trim_to_candles(cvd_spot_df,    ALERT_CANDLES)
+    cf = trim_to_candles(cvd_futures_df, ALERT_CANDLES)
+    oi = trim_to_candles(oi_df,          ALERT_CANDLES)
+
+    fig, _ = build_figure(p, cs, cf, oi, interval_str=interval_str)
+    fig.update_layout(margin=dict(l=0, r=55, t=8, b=25))
+    return fig.to_image(format="png", width=540, height=960)
+
+
+def _send_telegram(text: str, image_bytes: Optional[bytes]) -> None:
+    """Send photo (with caption) or text message to Telegram."""
+    if not _TELEGRAM_TOKEN or not _TELEGRAM_CHAT_ID:
+        return
+    base = f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}"
+    try:
+        if image_bytes:
+            requests.post(
+                f"{base}/sendPhoto",
+                data={"chat_id": _TELEGRAM_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                files={"photo": ("alert.png", image_bytes, "image/png")},
+                timeout=20,
+            )
+        else:
+            requests.post(
+                f"{base}/sendMessage",
+                json={"chat_id": _TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+    except Exception as e:
+        log.warning(f"Telegram send failed: {e}")
+
+
+def _alert_worker(
+    signal_data: dict,
+    price_df: pd.DataFrame,
+    cvd_spot_df: pd.DataFrame,
+    cvd_futures_df: pd.DataFrame,
+    oi_df: pd.DataFrame,
+    interval_str: str,
+) -> None:
+    """Background thread: render image, format message, send to Telegram."""
+    current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
+    image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str)
+    text          = _format_alert_message(signal_data, interval_str, current_price)
+    _send_telegram(text, image_bytes)
+    log.info(f"[alert] {interval_str} · {signal_data['signal']} → Telegram sent")
+
+
+def check_and_alert(state: dict) -> None:
+    """
+    Check all ALERT_TIMEFRAMES for active divergence signals.
+    Fires a Telegram alert once per candle that carries a new signal.
+    State is updated in-place and must be persisted by the caller.
+    """
+    from analysis import (
+        INTERVAL_MAP, DISPLAY_CANDLES,
+        resample_klines, compute_cvd, compute_oi_ohlc,
+        trim_to_candles, get_price_df, detect_spot_signals,
+    )
+
+    # Load raw data once (shared across all TF checks)
+    spot_raw    = load_parquet(DATA_DIR / "btc_spot_5m.parquet")
+    futures_raw = load_parquet(DATA_DIR / "btc_futures_5m.parquet")
+    oi_raw      = load_parquet(DATA_DIR / "btc_oi_1m.parquet")
+
+    if spot_raw.empty:
+        return
+
+    for tf in ALERT_TIMEFRAMES:
+        pandas_interval = INTERVAL_MAP[tf]
+
+        spot_rs    = resample_klines(spot_raw,    pandas_interval)
+        futures_rs = resample_klines(futures_raw, pandas_interval)
+
+        price_df       = trim_to_candles(get_price_df(spot_rs),                             DISPLAY_CANDLES)
+        cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    _ALL_SPOT_EXCHANGES),       DISPLAY_CANDLES)
+        cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, list(futures_raw["exchange"].unique()) if not futures_raw.empty else []), DISPLAY_CANDLES)
+        oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),           DISPLAY_CANDLES)
+
+        low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
+
+        if tf not in state:
+            state[tf] = {"low": None, "high": None}
+
+        for key, signal_data in [("low", low_data), ("high", high_data)]:
+            if signal_data is None:
+                continue
+            ts_str = pd.Timestamp(signal_data["timestamp"]).isoformat()
+            if ts_str == state[tf].get(key):
+                continue  # already alerted for this candle
+            state[tf][key] = ts_str
+            threading.Thread(
+                target=_alert_worker,
+                args=(signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df, tf),
+                daemon=True,
+            ).start()
+
+
+# ---------------------------------------------------------------------------
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 
@@ -703,12 +892,21 @@ def start() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     run_backfill()
 
+    alert_state = _load_alert_state()
     log.info(f"Collector running — update interval: {UPDATE_INTERVAL_S}s")
+
     while True:
         try:
             collect_cycle()
         except Exception as e:
             log.error(f"Collection cycle failed: {e}")
+
+        try:
+            check_and_alert(alert_state)
+            _save_alert_state(alert_state)
+        except Exception as e:
+            log.error(f"Alert check failed: {e}")
+
         time.sleep(UPDATE_INTERVAL_S)
 
 
