@@ -745,8 +745,11 @@ def _save_alert_state(state: dict) -> None:
         pass
 
 
-def _format_alert_message(signal_data: dict, interval_str: str, current_price: float) -> str:
-    """Format Telegram message text for a divergence alert."""
+def _format_alert_message(signal_data: dict, timeframes: list, current_price: float) -> str:
+    """
+    Format Telegram message text for a divergence alert.
+    timeframes: list of TF strings sorted highest-first, e.g. ["1h", "15m", "5m"]
+    """
     sig    = signal_data["signal"]
     emoji  = _SIGNAL_EMOJI.get(sig, "⚪")
     p_from = signal_data["price_from"]
@@ -760,9 +763,11 @@ def _format_alert_message(signal_data: dict, interval_str: str, current_price: f
     p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
     c_delta = c_to - c_from
     ts_str  = pd.Timestamp(ts).strftime("%H:%M UTC")
+    tf_str  = " · ".join(timeframes)
 
     return (
-        f"{emoji} <b>{sig}</b> [{interval_str}]\n\n"
+        f"{emoji} <b>{sig}</b>\n"
+        f"{tf_str}\n\n"
         f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f} ({p_pct:+.2f}%)\n"
         f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f} ({c_delta:+,.0f})\n\n"
         f"BTC/USDT @ {current_price:,.2f}\n"
@@ -819,24 +824,31 @@ def _send_telegram(text: str, image_bytes: Optional[bytes]) -> None:
 
 def _alert_worker(
     signal_data: dict,
+    timeframes: list,
     price_df: pd.DataFrame,
     cvd_spot_df: pd.DataFrame,
     cvd_futures_df: pd.DataFrame,
     oi_df: pd.DataFrame,
-    interval_str: str,
+    top_tf: str,
 ) -> None:
     """Background thread: render image, format message, send to Telegram."""
     current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
-    image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str)
-    text          = _format_alert_message(signal_data, interval_str, current_price)
+    image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf)
+    text          = _format_alert_message(signal_data, timeframes, current_price)
     _send_telegram(text, image_bytes)
-    log.info(f"[alert] {interval_str} · {signal_data['signal']} → Telegram sent")
+    log.info(f"[alert] {' · '.join(timeframes)} · {signal_data['signal']} → Telegram sent")
+
+
+# TF priority for sorting (highest first)
+_TF_PRIORITY = {"1h": 4, "30m": 3, "15m": 2, "5m": 1}
 
 
 def check_and_alert(state: dict) -> None:
     """
     Check all ALERT_TIMEFRAMES for active divergence signals.
-    Fires a Telegram alert once per candle that carries a new signal.
+
+    Collects all new signals in this cycle, groups them by signal type,
+    then sends one merged Telegram alert per type (highest TF image + all TFs listed).
     State is updated in-place and must be persisted by the caller.
     """
     from analysis import (
@@ -845,7 +857,6 @@ def check_and_alert(state: dict) -> None:
         trim_to_candles, get_price_df, detect_spot_signals,
     )
 
-    # Load raw data once (shared across all TF checks)
     spot_raw    = load_parquet(DATA_DIR / "btc_spot_5m.parquet")
     futures_raw = load_parquet(DATA_DIR / "btc_futures_5m.parquet")
     oi_raw      = load_parquet(DATA_DIR / "btc_oi_1m.parquet")
@@ -853,16 +864,24 @@ def check_and_alert(state: dict) -> None:
     if spot_raw.empty:
         return
 
+    futures_exchanges = (
+        list(futures_raw["exchange"].unique()) if not futures_raw.empty else []
+    )
+
+    # Collect new signals this cycle:
+    # signal_name -> list of (tf, signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df)
+    pending: dict = {}
+
     for tf in ALERT_TIMEFRAMES:
         pandas_interval = INTERVAL_MAP[tf]
 
         spot_rs    = resample_klines(spot_raw,    pandas_interval)
         futures_rs = resample_klines(futures_raw, pandas_interval)
 
-        price_df       = trim_to_candles(get_price_df(spot_rs),                             DISPLAY_CANDLES)
-        cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    _ALL_SPOT_EXCHANGES),       DISPLAY_CANDLES)
-        cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, list(futures_raw["exchange"].unique()) if not futures_raw.empty else []), DISPLAY_CANDLES)
-        oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),           DISPLAY_CANDLES)
+        price_df       = trim_to_candles(get_price_df(spot_rs),                       DISPLAY_CANDLES)
+        cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    _ALL_SPOT_EXCHANGES), DISPLAY_CANDLES)
+        cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_exchanges),   DISPLAY_CANDLES)
+        oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),     DISPLAY_CANDLES)
 
         low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
 
@@ -876,11 +895,21 @@ def check_and_alert(state: dict) -> None:
             if ts_str == state[tf].get(key):
                 continue  # already alerted for this candle
             state[tf][key] = ts_str
-            threading.Thread(
-                target=_alert_worker,
-                args=(signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df, tf),
-                daemon=True,
-            ).start()
+            sig_name = signal_data["signal"]
+            if sig_name not in pending:
+                pending[sig_name] = []
+            pending[sig_name].append((tf, signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df))
+
+    # One alert per signal type — highest TF provides image + price data
+    for sig_name, entries in pending.items():
+        entries.sort(key=lambda x: _TF_PRIORITY.get(x[0], 0), reverse=True)
+        timeframes = [e[0] for e in entries]
+        top_tf, top_signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df = entries[0]
+        threading.Thread(
+            target=_alert_worker,
+            args=(top_signal_data, timeframes, price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf),
+            daemon=True,
+        ).start()
 
 
 # ---------------------------------------------------------------------------
