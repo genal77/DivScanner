@@ -22,7 +22,10 @@ import dash
 import dash_auth
 from dash import dcc, html, Input, Output
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_WARSAW = ZoneInfo("Europe/Warsaw")
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +34,7 @@ from analysis import (
     INTERVAL_MAP, DISPLAY_CANDLES,
     SPOT_EXCHANGES, FUTURES_EXCHANGES,
     load_parquet, resample_klines, compute_cvd, compute_oi_ohlc,
+    to_warsaw,
     trim_to_candles, get_price_df, build_figure,
 )
 
@@ -167,8 +171,13 @@ def update_chart(_, interval_str, spot_selected, futures_selected):
     cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_selected  or []), DISPLAY_CANDLES)
     oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),        DISPLAY_CANDLES)
 
+    price_df       = to_warsaw(price_df)
+    cvd_spot_df    = to_warsaw(cvd_spot_df)
+    cvd_futures_df = to_warsaw(cvd_futures_df)
+    oi_df          = to_warsaw(oi_df)
+
     fig, _ = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str=interval_str)
-    now_str = "Updated " + datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    now_str = "Updated " + datetime.now(_WARSAW).strftime("%H:%M:%S (Warsaw)")
 
     return fig, now_str
 
