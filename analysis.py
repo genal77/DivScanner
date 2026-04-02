@@ -494,10 +494,12 @@ def build_figure(
             left_bars=pivot_left,
             right_bars=pivot_right,
         )
+        price_range  = price_df["high"].max() - price_df["low"].min()
+        arrow_offset = price_range * 0.018  # ~1.8% of visible range — roughly 1 arrow height
         if p_lows_vis:
             fig.add_trace(go.Scatter(
                 x=price_df["timestamp"].iloc[p_lows_vis],
-                y=price_df["low"].iloc[p_lows_vis] * 0.9985,
+                y=price_df["low"].iloc[p_lows_vis] - arrow_offset,
                 mode="markers",
                 marker=dict(symbol="triangle-up", size=8, color="lime"),
                 name="Pivot Low",
@@ -506,7 +508,7 @@ def build_figure(
         if p_highs_vis2:
             fig.add_trace(go.Scatter(
                 x=price_df["timestamp"].iloc[p_highs_vis2],
-                y=price_df["high"].iloc[p_highs_vis2] * 1.0015,
+                y=price_df["high"].iloc[p_highs_vis2] + arrow_offset,
                 mode="markers",
                 marker=dict(symbol="triangle-down", size=8, color="#ef5350"),
                 name="Pivot High",
