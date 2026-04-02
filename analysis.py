@@ -575,7 +575,11 @@ def build_alert_figure(
     - X-axis ticks: 8 per width (dynamic dtick)
     - Larger top margin to accommodate the banner
     """
-    # Convert timestamps to Warsaw time
+    # Detect signals on UTC data BEFORE timezone conversion
+    # (detect_spot_signals merges on timestamp — must stay UTC for consistency)
+    low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
+
+    # Convert timestamps to Warsaw time for display
     def _to_waw(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
@@ -671,15 +675,7 @@ def build_alert_figure(
                 draw_line(t0, merged["p_high"].iloc[p1],   t1, merged["p_high"].iloc[p2],   color, dash, 1.5, 1)
                 draw_line(t0, merged["cvd_high"].iloc[p1], t1, merged["cvd_high"].iloc[p2], color, dash, 1.5, 2)
 
-            # Live signal
-            low_data, high_data = detect_spot_signals(
-                to_warsaw(price_df.copy(), "timestamp").assign(
-                    **{c: price_df[c].values for c in ["high", "low"]}
-                ) if False else price_df,
-                cvd_spot_df,
-            )
-            # Note: detect_spot_signals works on UTC data internally;
-            # we pass original (already Warsaw-converted) dfs — timestamps match.
+            # Live signal — already detected on UTC data before timezone conversion
             for data in (low_data, high_data):
                 if not data:
                     continue
