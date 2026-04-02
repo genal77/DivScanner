@@ -136,21 +136,23 @@ app.layout = html.Div(
                         labelStyle=_CHECKLIST_LABEL,
                     ),
                     html.Span("LB", style={**_LABEL, "marginRight": "4px"}),
-                    dcc.Slider(
-                        id="pivot-lb",
-                        min=1, max=20, step=1, value=PIVOT_WINDOW,
-                        marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
-                        tooltip={"placement": "top", "always_visible": False},
-                        style=_SLIDER_STYLE,
-                    ),
+                    html.Div(style=_SLIDER_STYLE, children=[
+                        dcc.Slider(
+                            id="pivot-lb",
+                            min=1, max=20, step=1, value=PIVOT_WINDOW,
+                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                            tooltip={"placement": "top", "always_visible": False},
+                        ),
+                    ]),
                     html.Span("RB", style={**_LABEL, "marginLeft": "8px", "marginRight": "4px"}),
-                    dcc.Slider(
-                        id="pivot-rb",
-                        min=1, max=20, step=1, value=PIVOT_WINDOW,
-                        marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
-                        tooltip={"placement": "top", "always_visible": False},
-                        style=_SLIDER_STYLE,
-                    ),
+                    html.Div(style=_SLIDER_STYLE, children=[
+                        dcc.Slider(
+                            id="pivot-rb",
+                            min=1, max=20, step=1, value=PIVOT_WINDOW,
+                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                            tooltip={"placement": "top", "always_visible": False},
+                        ),
+                    ]),
                 ]),
 
                 html.Div(id="last-updated", style={"color": _MUTED, "fontSize": "11px", "marginLeft": "auto"}),
