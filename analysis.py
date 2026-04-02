@@ -714,19 +714,19 @@ def build_alert_figure(
             xanchor="center", yanchor="bottom",
         )
 
-    # Panel labels
+    # Panel labels — positioned at top edge of each panel, in the gap between panels
     panel_labels = [
-        (0.985, "BTC/USDT  ·  Binance Spot"),
-        (0.570, "CVD Spot  ·  Aggregated"),
-        (0.360, "CVD Futures  ·  Aggregated"),
-        (0.145, "Open Interest  ·  Binance Futures"),
+        (1.0,   "BTC/USDT  ·  Binance Spot"),
+        (0.604, "CVD Spot  ·  Aggregated"),
+        (0.396, "CVD Futures  ·  Aggregated"),
+        (0.188, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
             x=0.005, y=y_paper, xref="paper", yref="paper",
             text=f"<b>{text}</b>", showarrow=False,
             font=dict(size=11, color="rgba(255,255,255,0.45)"),
-            align="left", xanchor="left",
+            align="left", xanchor="left", yanchor="bottom",
         )
 
     # X-axis: 8 ticks across the width, Warsaw time format
