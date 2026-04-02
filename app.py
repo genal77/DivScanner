@@ -68,7 +68,8 @@ _LABEL  = {
 }
 _CHECKLIST_LABEL = {"color": _TEXT, "marginRight": "10px", "fontSize": "12px"}
 _CHECKLIST_INPUT = {"marginRight": "4px", "accentColor": "#26a69a"}
-_SLIDER_STYLE    = {"width": "80px", "display": "inline-block", "verticalAlign": "middle"}
+_SLIDER_STYLE    = {"width": "120px", "display": "inline-block", "verticalAlign": "middle"}
+_SLIDER_CSS      = {"height": "18px"}
 
 app.layout = html.Div(
     style={"backgroundColor": _DARK, "height": "100vh", "display": "flex", "flexDirection": "column", "fontFamily": "system-ui, sans-serif"},
@@ -139,18 +140,20 @@ app.layout = html.Div(
                     html.Div(style=_SLIDER_STYLE, children=[
                         dcc.Slider(
                             id="pivot-lb",
-                            min=1, max=20, step=1, value=PIVOT_WINDOW,
-                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                            min=1, max=10, step=1, value=PIVOT_WINDOW,
+                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in range(1, 11)},
                             tooltip={"placement": "top", "always_visible": False},
+                            className="pivot-slider",
                         ),
                     ]),
                     html.Span("RB", style={**_LABEL, "marginLeft": "8px", "marginRight": "4px"}),
                     html.Div(style=_SLIDER_STYLE, children=[
                         dcc.Slider(
                             id="pivot-rb",
-                            min=1, max=20, step=1, value=PIVOT_WINDOW,
-                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                            min=1, max=10, step=1, value=PIVOT_WINDOW,
+                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in range(1, 11)},
                             tooltip={"placement": "top", "always_visible": False},
+                            className="pivot-slider",
                         ),
                     ]),
                 ]),

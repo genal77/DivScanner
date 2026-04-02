@@ -21,5 +21,6 @@ services:
       - ./data:/app/data
       - ./app.py:/app/app.py
       - ./analysis.py:/app/analysis.py
+      - ./assets:/app/assets
     depends_on:
       - collector

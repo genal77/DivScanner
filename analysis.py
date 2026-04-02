@@ -497,7 +497,7 @@ def build_figure(
         if p_lows_vis:
             fig.add_trace(go.Scatter(
                 x=price_df["timestamp"].iloc[p_lows_vis],
-                y=price_df["low"].iloc[p_lows_vis] * 0.9995,
+                y=price_df["low"].iloc[p_lows_vis] * 0.9985,
                 mode="markers",
                 marker=dict(symbol="triangle-up", size=8, color="lime"),
                 name="Pivot Low",
@@ -506,7 +506,7 @@ def build_figure(
         if p_highs_vis2:
             fig.add_trace(go.Scatter(
                 x=price_df["timestamp"].iloc[p_highs_vis2],
-                y=price_df["high"].iloc[p_highs_vis2] * 1.0005,
+                y=price_df["high"].iloc[p_highs_vis2] * 1.0015,
                 mode="markers",
                 marker=dict(symbol="triangle-down", size=8, color="#ef5350"),
                 name="Pivot High",
