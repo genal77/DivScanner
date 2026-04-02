@@ -64,19 +64,46 @@ _LABEL  = {
 }
 _CHECKLIST_LABEL = {"color": _TEXT, "marginRight": "10px", "fontSize": "12px"}
 _CHECKLIST_INPUT = {"marginRight": "4px", "accentColor": "#26a69a"}
-_SLIDER_STYLE    = {"width": "110px", "display": "inline-block", "verticalAlign": "middle"}
-_VAL_BADGE       = {
-    "display": "inline-block",
-    "width": "18px",
-    "textAlign": "center",
-    "color": "white",
-    "fontSize": "11px",
-    "fontWeight": "bold",
-    "marginRight": "6px",
+
+# Sidebar checklist labels — vertical layout
+_SIDEBAR_LABEL = {
+    "color": _TEXT,
+    "fontSize": "12px",
+    "display": "block",
+    "marginBottom": "5px",
+    "whiteSpace": "nowrap",
 }
 
-# Sidebar checklist labels — vertical layout for sidebar
-_SIDEBAR_LABEL = {"color": _TEXT, "fontSize": "12px", "display": "block", "marginBottom": "5px"}
+_SECTION_HEADER = {
+    "color": _MUTED,
+    "fontSize": "10px",
+    "textTransform": "uppercase",
+    "letterSpacing": "0.8px",
+    "marginBottom": "8px",
+    "paddingBottom": "4px",
+    "borderBottom": f"1px solid {_BORDER}",
+    "whiteSpace": "nowrap",
+}
+
+# Sidebar open state style
+_SIDEBAR_OPEN = {
+    "backgroundColor": _PANEL,
+    "borderLeft": f"1px solid {_BORDER}",
+    "display": "flex",
+    "flexDirection": "column",
+    "flexShrink": "0",
+    "width": "fit-content",
+}
+
+# Sidebar collapsed state style
+_SIDEBAR_COLLAPSED = {
+    "backgroundColor": _PANEL,
+    "borderLeft": f"1px solid {_BORDER}",
+    "display": "flex",
+    "flexDirection": "column",
+    "flexShrink": "0",
+    "width": "32px",
+}
 
 # ---------------------------------------------------------------------------
 # DASH APP
@@ -96,7 +123,7 @@ app.layout = html.Div(
     },
     children=[
 
-        # ── Persistent state stores ───────────────────────────────────────
+        # ── Persistent state store ────────────────────────────────────────
         dcc.Store(
             id="exchange-state",
             storage_type="local",
@@ -138,46 +165,12 @@ app.layout = html.Div(
                     ),
                 ]),
 
-                # Pivot controls
-                html.Div(style={"display": "flex", "alignItems": "center", "gap": "6px"}, children=[
-                    html.Span("Pivots", style=_LABEL),
-                    dcc.Checklist(
-                        id="show-pivots",
-                        options=[{"label": "", "value": "show"}],
-                        value=[],
-                        inputStyle=_CHECKLIST_INPUT,
-                        labelStyle=_CHECKLIST_LABEL,
-                    ),
-                    html.Span("LB", style={**_LABEL, "marginRight": "4px"}),
-                    html.Span(str(PIVOT_WINDOW), id="pivot-lb-val", style=_VAL_BADGE),
-                    html.Div(style=_SLIDER_STYLE, children=[
-                        dcc.Slider(
-                            id="pivot-lb",
-                            min=1, max=10, step=1, value=PIVOT_WINDOW,
-                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in range(1, 11)},
-                            tooltip={"placement": "top", "always_visible": False},
-                            className="pivot-slider",
-                        ),
-                    ]),
-                    html.Span("RB", style={**_LABEL, "marginLeft": "6px", "marginRight": "4px"}),
-                    html.Span(str(PIVOT_WINDOW), id="pivot-rb-val", style=_VAL_BADGE),
-                    html.Div(style=_SLIDER_STYLE, children=[
-                        dcc.Slider(
-                            id="pivot-rb",
-                            min=1, max=10, step=1, value=PIVOT_WINDOW,
-                            marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in range(1, 11)},
-                            tooltip={"placement": "top", "always_visible": False},
-                            className="pivot-slider",
-                        ),
-                    ]),
-                ]),
-
                 # Last updated timestamp
                 html.Div(id="last-updated", style={"color": _MUTED, "fontSize": "11px", "marginLeft": "auto"}),
             ],
         ),
 
-        # ── Main area: chart + sidebar ─────────────────────────────────────
+        # ── Main area: chart + sidebar ────────────────────────────────────
         html.Div(
             style={"display": "flex", "flex": "1", "minHeight": "0"},
             children=[
@@ -192,16 +185,9 @@ app.layout = html.Div(
                 # Right sidebar
                 html.Div(
                     id="sidebar",
-                    style={
-                        "backgroundColor": _PANEL,
-                        "borderLeft": f"1px solid {_BORDER}",
-                        "display": "flex",
-                        "flexDirection": "column",
-                        "flexShrink": "0",
-                        "width": "200px",
-                        "transition": "width 0.15s ease",
-                    },
+                    style=_SIDEBAR_OPEN,
                     children=[
+
                         # Toggle button row
                         html.Div(
                             style={
@@ -227,7 +213,7 @@ app.layout = html.Div(
                             ],
                         ),
 
-                        # Sidebar content (exchange toggles)
+                        # Sidebar content
                         html.Div(
                             id="sidebar-content",
                             style={"padding": "4px 14px 14px 14px", "overflowY": "auto"},
@@ -237,18 +223,7 @@ app.layout = html.Div(
                                 html.Div(
                                     style={"marginBottom": "18px"},
                                     children=[
-                                        html.Div(
-                                            "CVD Spot",
-                                            style={
-                                                "color": _MUTED,
-                                                "fontSize": "10px",
-                                                "textTransform": "uppercase",
-                                                "letterSpacing": "0.8px",
-                                                "marginBottom": "8px",
-                                                "paddingBottom": "4px",
-                                                "borderBottom": f"1px solid {_BORDER}",
-                                            },
-                                        ),
+                                        html.Div("CVD Spot", style=_SECTION_HEADER),
                                         dcc.Checklist(
                                             id="spot-exchanges",
                                             options=[{"label": label, "value": key} for key, label in SPOT_EXCHANGES.items()],
@@ -261,19 +236,9 @@ app.layout = html.Div(
 
                                 # CVD Futures section
                                 html.Div(
+                                    style={"marginBottom": "18px"},
                                     children=[
-                                        html.Div(
-                                            "CVD Futures",
-                                            style={
-                                                "color": _MUTED,
-                                                "fontSize": "10px",
-                                                "textTransform": "uppercase",
-                                                "letterSpacing": "0.8px",
-                                                "marginBottom": "8px",
-                                                "paddingBottom": "4px",
-                                                "borderBottom": f"1px solid {_BORDER}",
-                                            },
-                                        ),
+                                        html.Div("CVD Futures", style=_SECTION_HEADER),
                                         dcc.Checklist(
                                             id="futures-exchanges",
                                             options=[{"label": label, "value": key} for key, label in FUTURES_EXCHANGES.items()],
@@ -283,6 +248,49 @@ app.layout = html.Div(
                                         ),
                                     ],
                                 ),
+
+                                # Pivots section
+                                html.Div(
+                                    children=[
+                                        html.Div("Pivots", style=_SECTION_HEADER),
+                                        dcc.Checklist(
+                                            id="show-pivots",
+                                            options=[{"label": "Show", "value": "show"}],
+                                            value=[],
+                                            inputStyle=_CHECKLIST_INPUT,
+                                            labelStyle={**_SIDEBAR_LABEL, "marginBottom": "10px"},
+                                        ),
+                                        html.Div("LB", style={**_LABEL, "marginBottom": "4px"}),
+                                        html.Div(style={"width": "100%", "marginBottom": "14px"}, children=[
+                                            dcc.Slider(
+                                                id="pivot-lb",
+                                                min=1, max=10, step=1, value=PIVOT_WINDOW,
+                                                marks={
+                                                    1:  {"label": "1",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                },
+                                                tooltip={"placement": "top", "always_visible": False},
+                                                className="pivot-slider",
+                                            ),
+                                        ]),
+                                        html.Div("RB", style={**_LABEL, "marginBottom": "4px"}),
+                                        html.Div(style={"width": "100%"}, children=[
+                                            dcc.Slider(
+                                                id="pivot-rb",
+                                                min=1, max=10, step=1, value=PIVOT_WINDOW,
+                                                marks={
+                                                    1:  {"label": "1",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                },
+                                                tooltip={"placement": "top", "always_visible": False},
+                                                className="pivot-slider",
+                                            ),
+                                        ]),
+                                    ],
+                                ),
+
                             ],
                         ),
                     ],
@@ -335,44 +343,18 @@ def save_exchange_state(spot, futures):
     prevent_initial_call=True,
 )
 def toggle_sidebar(n_clicks, current_label):
-    """Toggle sidebar open/closed."""
+    """Toggle sidebar open/closed. ▶ = open (click to collapse), ◀ = collapsed (click to expand)."""
     if current_label == "▶":
-        # Currently collapsed → expand
-        return (
-            {"padding": "4px 14px 14px 14px", "overflowY": "auto"},
-            {
-                "backgroundColor": _PANEL,
-                "borderLeft": f"1px solid {_BORDER}",
-                "display": "flex",
-                "flexDirection": "column",
-                "flexShrink": "0",
-                "width": "200px",
-                "transition": "width 0.15s ease",
-            },
-            "▶",
-        )
+        # Currently open → collapse
+        return {"display": "none"}, _SIDEBAR_COLLAPSED, "◀"
     else:
-        # Currently expanded → collapse
-        return (
-            {"display": "none"},
-            {
-                "backgroundColor": _PANEL,
-                "borderLeft": f"1px solid {_BORDER}",
-                "display": "flex",
-                "flexDirection": "column",
-                "flexShrink": "0",
-                "width": "32px",
-                "transition": "width 0.15s ease",
-            },
-            "◀",
-        )
+        # Currently collapsed → expand
+        return {"padding": "4px 14px 14px 14px", "overflowY": "auto"}, _SIDEBAR_OPEN, "▶"
 
 
 @app.callback(
     Output("main-chart", "figure"),
     Output("last-updated", "children"),
-    Output("pivot-lb-val", "children"),
-    Output("pivot-rb-val", "children"),
     Input("refresh-interval", "n_intervals"),
     Input("interval-selector", "value"),
     Input("spot-exchanges", "value"),
@@ -405,19 +387,16 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
     cvd_futures_df = to_warsaw(cvd_futures_df)
     oi_df          = to_warsaw(oi_df)
 
-    lb = pivot_lb or PIVOT_WINDOW
-    rb = pivot_rb or PIVOT_WINDOW
-
     fig, _ = build_figure(
         price_df, cvd_spot_df, cvd_futures_df, oi_df,
         interval_str=interval_str,
         show_pivots=bool(show_pivots_val),
-        pivot_left=lb,
-        pivot_right=rb,
+        pivot_left=pivot_lb or PIVOT_WINDOW,
+        pivot_right=pivot_rb or PIVOT_WINDOW,
     )
     now_str = "Updated " + datetime.now(_WARSAW).strftime("%H:%M:%S (Warsaw)")
 
-    return fig, now_str, str(lb), str(rb)
+    return fig, now_str
 
 
 # ---------------------------------------------------------------------------
