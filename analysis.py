@@ -495,7 +495,7 @@ def build_figure(
             right_bars=pivot_right,
         )
         price_range  = price_df["high"].max() - price_df["low"].min()
-        arrow_offset = price_range * 0.09  # ~9% of visible range
+        arrow_offset = price_range * 0.045  # ~4.5% of visible range
         if p_lows_vis:
             fig.add_trace(go.Scatter(
                 x=price_df["timestamp"].iloc[p_lows_vis],
