@@ -148,6 +148,10 @@ def compute_oi_ohlc(oi_df: pd.DataFrame, pandas_interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     oi = oi_df.set_index("timestamp").sort_index()
+    # Forward-fill missing 1m snapshots before resampling.
+    # The collector polls OI every ~60s but cycle overhead causes ~1 missed snapshot
+    # per 9 cycles. OI changes smoothly so filling with the previous value is correct.
+    oi = oi.resample("1min").last().ffill()
     resampled = pd.DataFrame({
         "open":  oi["oi_value"].resample(pandas_interval).first(),
         "high":  oi["oi_value"].resample(pandas_interval).max(),
@@ -199,6 +203,36 @@ def find_pivot_indices(series: pd.Series, window: int = PIVOT_WINDOW) -> Tuple[l
     return lows, highs
 
 
+def compute_divergence_score(
+    price_from: float,
+    price_to:   float,
+    cvd_from:   float,
+    cvd_to:     float,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Compute divergence strength metrics.
+
+    Returns (price_move_pct, cvd_move_pct, div_score):
+      - price_move_pct: % change in price between the two pivots
+      - cvd_move_pct:   % change in CVD between the two pivots (None if cvd_from ≈ 0)
+      - div_score:      abs gap between the two percentages (None if cvd_move_pct is None)
+
+    div_score accumulates over time to build an empirical scale of signal strength.
+    """
+    price_move_pct = (price_to - price_from) / price_from * 100 if price_from else None
+
+    if abs(cvd_from) < 1e-6:
+        return price_move_pct, None, None
+
+    cvd_move_pct = (cvd_to - cvd_from) / abs(cvd_from) * 100
+    div_score = (
+        abs(price_move_pct - cvd_move_pct)
+        if price_move_pct is not None
+        else None
+    )
+    return price_move_pct, cvd_move_pct, div_score
+
+
 def detect_spot_signals(
     price_df:     pd.DataFrame,
     cvd_spot_df:  pd.DataFrame,
@@ -241,13 +275,21 @@ def detect_spot_signals(
             if   l_pdif < 0 and l_cdif > 0: signal = "SELLERS EXHAUSTION"
             elif l_pdif > 0 and l_cdif < 0: signal = "SELLERS ABSORPTION"
             if signal:
+                pf = float(merged["p_low"].iloc[last_l])
+                pt = float(merged["p_low"].iloc[curr])
+                cf = float(merged["cvd_low"].iloc[last_l])
+                ct = float(merged["cvd_low"].iloc[curr])
+                p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
                 low_data = {
-                    "signal":     signal,
-                    "price_from": float(merged["p_low"].iloc[last_l]),
-                    "price_to":   float(merged["p_low"].iloc[curr]),
-                    "cvd_from":   float(merged["cvd_low"].iloc[last_l]),
-                    "cvd_to":     float(merged["cvd_low"].iloc[curr]),
-                    "timestamp":  merged["timestamp"].iloc[curr],
+                    "signal":         signal,
+                    "price_from":     pf,
+                    "price_to":       pt,
+                    "cvd_from":       cf,
+                    "cvd_to":         ct,
+                    "timestamp":      merged["timestamp"].iloc[curr],
+                    "price_move_pct": p_pct,
+                    "cvd_move_pct":   c_pct,
+                    "div_score":      score,
                 }
 
     # Check high: current candle is the highest since last confirmed pivot high
@@ -261,13 +303,21 @@ def detect_spot_signals(
             if   h_pdif > 0 and h_cdif < 0: signal = "BUYERS EXHAUSTION"
             elif h_pdif < 0 and h_cdif > 0: signal = "BUYERS ABSORPTION"
             if signal:
+                pf = float(merged["p_high"].iloc[last_h])
+                pt = float(merged["p_high"].iloc[curr])
+                cf = float(merged["cvd_high"].iloc[last_h])
+                ct = float(merged["cvd_high"].iloc[curr])
+                p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
                 high_data = {
-                    "signal":     signal,
-                    "price_from": float(merged["p_high"].iloc[last_h]),
-                    "price_to":   float(merged["p_high"].iloc[curr]),
-                    "cvd_from":   float(merged["cvd_high"].iloc[last_h]),
-                    "cvd_to":     float(merged["cvd_high"].iloc[curr]),
-                    "timestamp":  merged["timestamp"].iloc[curr],
+                    "signal":         signal,
+                    "price_from":     pf,
+                    "price_to":       pt,
+                    "cvd_from":       cf,
+                    "cvd_to":         ct,
+                    "timestamp":      merged["timestamp"].iloc[curr],
+                    "price_move_pct": p_pct,
+                    "cvd_move_pct":   c_pct,
+                    "div_score":      score,
                 }
 
     return low_data, high_data
@@ -407,7 +457,14 @@ def build_figure(
                     t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
                     draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
                     draw_line(t0, merged[c_col].iloc[last_p], t1, merged[c_col].iloc[curr], color, dash, 3, 2)
-                active_signals.append((color, f"SPOT · {data['signal']}"))
+                p_pct = data.get("price_move_pct")
+                c_pct = data.get("cvd_move_pct")
+                score = data.get("div_score")
+                metrics = ""
+                if p_pct is not None and c_pct is not None:
+                    score_str = f"  Δ{score:.1f}%" if score is not None else ""
+                    metrics = f"  ·  price {p_pct:+.2f}%  CVD {c_pct:+.2f}%{score_str}"
+                active_signals.append((color, f"SPOT · {data['signal']}{metrics}"))
                 active_signal_data.append(data)
 
         # CVD Futures divergences disabled — futures data still accumulating
