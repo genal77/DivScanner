@@ -477,7 +477,7 @@ def build_figure(
                 if p_pct is not None and c_pct is not None:
                     score_str = f"  Δ{score:.1f}%" if score is not None else ""
                     metrics = f"  ·  price {p_pct:+.2f}%  CVD {c_pct:+.2f}%{score_str}"
-                active_signals.append((color, f"SPOT · {data['signal']}{metrics}"))
+                active_signals.append((color, f"{data['signal']}{metrics}"))
                 active_signal_data.append(data)
 
         # CVD Futures divergences disabled — futures data still accumulating
@@ -515,33 +515,33 @@ def build_figure(
                 hoverinfo="skip",
             ), row=1, col=1)
 
-    # Live signal banner
+    # Live signal banner — placed ABOVE chart (in top margin)
     if active_signals:
         signal_text    = "   |   ".join(f"<b>{label}</b>" for _, label in active_signals)
         dominant_color = active_signals[0][0]
         fig.add_annotation(
-            x=0.5, y=0.995, xref="paper", yref="paper",
+            x=0.5, y=1.0, xref="paper", yref="paper",
             text=signal_text, showarrow=False,
             font=dict(size=14, color=dominant_color),
             bgcolor="rgba(0,0,0,0.80)",
             bordercolor=dominant_color,
             borderpad=8,
-            xanchor="center", yanchor="top",
+            xanchor="center", yanchor="bottom",
         )
 
-    # Panel labels
+    # Panel labels — at top edge of each panel, yanchor="bottom" so they sit inside
     panel_labels = [
-        (0.985, "BTC/USDT  ·  Binance Spot"),
-        (0.570, "CVD Spot  ·  Aggregated"),
-        (0.360, "CVD Futures  ·  Aggregated"),
-        (0.145, "Open Interest  ·  Binance Futures"),
+        (1.0,   "BTC/USDT  ·  Binance Spot"),
+        (0.604, "CVD Spot  ·  Aggregated  · BTC"),
+        (0.396, "CVD Futures  ·  Aggregated  · BTC"),
+        (0.188, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
             x=0.005, y=y_paper, xref="paper", yref="paper",
             text=f"<b>{text}</b>", showarrow=False,
-            font=dict(size=11, color="rgba(255,255,255,0.45)"),
-            align="left", xanchor="left",
+            font=dict(size=11, color="rgba(255,255,255,0.65)"),
+            align="left", xanchor="left", yanchor="bottom",
         )
 
     # X-axis range: extend right by 10 empty candles
@@ -578,7 +578,7 @@ def build_figure(
         paper_bgcolor="#111",
         plot_bgcolor="#0d0d0d",
         autosize=True,
-        margin=dict(l=0, r=70, t=0, b=0),
+        margin=dict(l=0, r=70, t=40, b=0),
         showlegend=False,
         hovermode="x unified",
     )
