@@ -765,7 +765,8 @@ def _format_alert_message(signal_data: dict, timeframes: list, current_price: fl
     p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
     c_pct   = signal_data.get("cvd_move_pct")
     score   = signal_data.get("div_score")
-    ts_str  = pd.Timestamp(ts).strftime("%H:%M UTC")
+    from zoneinfo import ZoneInfo
+    ts_str  = pd.Timestamp(ts).tz_convert(ZoneInfo("Europe/Warsaw")).strftime("%H:%M (Warsaw)")
     tf_str  = "".join(f"[{tf}]" for tf in timeframes)
 
     cvd_pct_str  = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
@@ -791,7 +792,7 @@ def _build_alert_image(
     """Render 540×960 PNG (9:16) of the last ALERT_CANDLES. Returns None if kaleido missing."""
     try:
         import kaleido  # noqa: F401
-        from analysis import build_figure, trim_to_candles, ALERT_CANDLES
+        from analysis import build_alert_figure, trim_to_candles, ALERT_CANDLES
     except ImportError:
         return None
 
@@ -800,8 +801,7 @@ def _build_alert_image(
     cf = trim_to_candles(cvd_futures_df, ALERT_CANDLES)
     oi = trim_to_candles(oi_df,          ALERT_CANDLES)
 
-    fig, _ = build_figure(p, cs, cf, oi, interval_str=interval_str)
-    fig.update_layout(margin=dict(l=0, r=55, t=8, b=25))
+    fig = build_alert_figure(p, cs, cf, oi, interval_str=interval_str)
     return fig.to_image(format="png", width=540, height=960)
 
 
