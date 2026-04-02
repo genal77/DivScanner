@@ -548,9 +548,13 @@ def build_figure(
 # ---------------------------------------------------------------------------
 
 def to_warsaw(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFrame:
-    """Return a copy of df with timestamp column converted to Europe/Warsaw."""
+    """
+    Return a copy of df with timestamp column converted to Europe/Warsaw.
+    Timezone info is stripped after conversion so Plotly.js displays the
+    local time as-is without converting back to UTC in the browser.
+    """
     df = df.copy()
-    df[ts_col] = df[ts_col].dt.tz_convert(_WARSAW)
+    df[ts_col] = df[ts_col].dt.tz_convert(_WARSAW).dt.tz_localize(None)
     return df
 
 
