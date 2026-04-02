@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from analysis import (
-    INTERVAL_MAP, DISPLAY_CANDLES,
+    INTERVAL_MAP, DISPLAY_CANDLES, PIVOT_WINDOW,
     SPOT_EXCHANGES, FUTURES_EXCHANGES,
     load_parquet, resample_klines, compute_cvd, compute_oi_ohlc,
     to_warsaw,
@@ -68,6 +68,7 @@ _LABEL  = {
 }
 _CHECKLIST_LABEL = {"color": _TEXT, "marginRight": "10px", "fontSize": "12px"}
 _CHECKLIST_INPUT = {"marginRight": "4px", "accentColor": "#26a69a"}
+_SLIDER_STYLE    = {"width": "80px", "display": "inline-block", "verticalAlign": "middle"}
 
 app.layout = html.Div(
     style={"backgroundColor": _DARK, "height": "100vh", "display": "flex", "flexDirection": "column", "fontFamily": "system-ui, sans-serif"},
@@ -124,6 +125,34 @@ app.layout = html.Div(
                     ),
                 ]),
 
+                # ── Pivot controls ────────────────────────────────────────
+                html.Div(style={"display": "flex", "alignItems": "center", "gap": "8px"}, children=[
+                    html.Span("Pivots", style=_LABEL),
+                    dcc.Checklist(
+                        id="show-pivots",
+                        options=[{"label": "", "value": "show"}],
+                        value=[],
+                        inputStyle=_CHECKLIST_INPUT,
+                        labelStyle=_CHECKLIST_LABEL,
+                    ),
+                    html.Span("LB", style={**_LABEL, "marginRight": "4px"}),
+                    dcc.Slider(
+                        id="pivot-lb",
+                        min=1, max=20, step=1, value=PIVOT_WINDOW,
+                        marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                        tooltip={"placement": "top", "always_visible": False},
+                        style=_SLIDER_STYLE,
+                    ),
+                    html.Span("RB", style={**_LABEL, "marginLeft": "8px", "marginRight": "4px"}),
+                    dcc.Slider(
+                        id="pivot-rb",
+                        min=1, max=20, step=1, value=PIVOT_WINDOW,
+                        marks={i: {"label": str(i), "style": {"color": _MUTED, "fontSize": "9px"}} for i in [1, 5, 10, 15, 20]},
+                        tooltip={"placement": "top", "always_visible": False},
+                        style=_SLIDER_STYLE,
+                    ),
+                ]),
+
                 html.Div(id="last-updated", style={"color": _MUTED, "fontSize": "11px", "marginLeft": "auto"}),
             ],
         ),
@@ -151,8 +180,11 @@ app.layout = html.Div(
     Input("interval-selector", "value"),
     Input("spot-exchanges", "value"),
     Input("futures-exchanges", "value"),
+    Input("show-pivots", "value"),
+    Input("pivot-lb", "value"),
+    Input("pivot-rb", "value"),
 )
-def update_chart(_, interval_str, spot_selected, futures_selected):
+def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_val, pivot_lb, pivot_rb):
     """
     Triggered every 10s (auto-refresh) or on any control change.
     Reloads data from disk, resamples, computes CVD/OI, rebuilds figure.
@@ -176,7 +208,13 @@ def update_chart(_, interval_str, spot_selected, futures_selected):
     cvd_futures_df = to_warsaw(cvd_futures_df)
     oi_df          = to_warsaw(oi_df)
 
-    fig, _ = build_figure(price_df, cvd_spot_df, cvd_futures_df, oi_df, interval_str=interval_str)
+    fig, _ = build_figure(
+        price_df, cvd_spot_df, cvd_futures_df, oi_df,
+        interval_str=interval_str,
+        show_pivots=bool(show_pivots_val),
+        pivot_left=pivot_lb or PIVOT_WINDOW,
+        pivot_right=pivot_rb or PIVOT_WINDOW,
+    )
     now_str = "Updated " + datetime.now(_WARSAW).strftime("%H:%M:%S (Warsaw)")
 
     return fig, now_str

@@ -185,20 +185,27 @@ def get_price_df(spot_df: pd.DataFrame) -> pd.DataFrame:
 # DIVERGENCE DETECTION  (pure — no Plotly)
 # ---------------------------------------------------------------------------
 
-def find_pivot_indices(series: pd.Series, window: int = PIVOT_WINDOW) -> Tuple[list, list]:
+def find_pivot_indices(
+    series: pd.Series,
+    window: int = PIVOT_WINDOW,
+    left_bars: Optional[int] = None,
+    right_bars: Optional[int] = None,
+) -> Tuple[list, list]:
     """
     Find pivot lows and highs in a Series.
 
-    A pivot LOW  at index i: series[i] is the minimum within [i-window, i+window]
-    A pivot HIGH at index i: series[i] is the maximum within [i-window, i+window]
+    A pivot LOW  at index i: series[i] is the minimum within [i-left, i+right]
+    A pivot HIGH at index i: series[i] is the maximum within [i-left, i+right]
 
+    left_bars / right_bars override the symmetric `window` when provided.
     Returns (low_indices, high_indices).
-    First and last `window` candles cannot be pivots by definition.
     """
+    lb = left_bars  if left_bars  is not None else window
+    rb = right_bars if right_bars is not None else window
     lows, highs = [], []
     arr = series.values
-    for i in range(window, len(arr) - window):
-        window_slice = arr[i - window: i + window + 1]
+    for i in range(lb, len(arr) - rb):
+        window_slice = arr[i - lb: i + rb + 1]
         if arr[i] == window_slice.min():
             lows.append(i)
         if arr[i] == window_slice.max():
@@ -337,6 +344,9 @@ def build_figure(
     oi_df:            pd.DataFrame,
     show_divergences: bool = True,
     interval_str:     str  = "15m",
+    show_pivots:      bool = False,
+    pivot_left:       int  = PIVOT_WINDOW,
+    pivot_right:      int  = PIVOT_WINDOW,
 ) -> Tuple[go.Figure, List[dict]]:
     """
     Assemble the 4-panel Plotly figure.
@@ -471,6 +481,37 @@ def build_figure(
                 active_signal_data.append(data)
 
         # CVD Futures divergences disabled — futures data still accumulating
+
+    # ── Pivot markers ─────────────────────────────────────────────────────
+    if show_pivots and not price_df.empty:
+        p_lows_vis, p_highs_vis = find_pivot_indices(
+            price_df["low"],
+            left_bars=pivot_left,
+            right_bars=pivot_right,
+        )
+        _, p_highs_vis2 = find_pivot_indices(
+            price_df["high"],
+            left_bars=pivot_left,
+            right_bars=pivot_right,
+        )
+        if p_lows_vis:
+            fig.add_trace(go.Scatter(
+                x=price_df["timestamp"].iloc[p_lows_vis],
+                y=price_df["low"].iloc[p_lows_vis] * 0.9995,
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=8, color="lime"),
+                name="Pivot Low",
+                hoverinfo="skip",
+            ), row=1, col=1)
+        if p_highs_vis2:
+            fig.add_trace(go.Scatter(
+                x=price_df["timestamp"].iloc[p_highs_vis2],
+                y=price_df["high"].iloc[p_highs_vis2] * 1.0005,
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=8, color="#ef5350"),
+                name="Pivot High",
+                hoverinfo="skip",
+            ), row=1, col=1)
 
     # Live signal banner
     if active_signals:
