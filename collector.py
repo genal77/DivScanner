@@ -41,7 +41,8 @@ _TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # CONFIG
 # ---------------------------------------------------------------------------
 
-DATA_DIR = Path("data")
+DATA_DIR        = Path("data")
+SIGNAL_LOG_FILE = DATA_DIR / "signal_log.csv"
 HISTORY_DAYS = 5
 INTERVAL_5M_MS = 5 * 60 * 1000
 CANDLE_INTERVAL = "5min"        # pandas resample string
@@ -709,15 +710,16 @@ def run_backfill() -> None:
 
 # TFs to check for divergences on every collection cycle
 ALERT_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
+MIN_DIV_SCORE    = 5.0   # minimum div_score (%) to trigger an alert — tune after observing signal_log.csv
 
 # State file — persists last-alerted candle timestamps across restarts
 ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
 
 _SIGNAL_EMOJI = {
-    "SELLERS EXHAUSTION": "🟢",
-    "SELLERS ABSORPTION": "🔵",
-    "BUYERS EXHAUSTION":  "🔴",
-    "BUYERS ABSORPTION":  "🟠",
+    "SELLERS EXHAUSTION": "🔵",
+    "SELLERS ABSORPTION": "🟢",
+    "BUYERS EXHAUSTION":  "🟠",
+    "BUYERS ABSORPTION":  "🔴" 
 }
 
 # All spot exchanges used for CVD aggregation (mirrors app.py default)
@@ -761,15 +763,19 @@ def _format_alert_message(signal_data: dict, timeframes: list, current_price: fl
     p_arrow = "↑" if p_to >= p_from else "↓"
     c_arrow = "↑" if c_to >= c_from else "↓"
     p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
-    c_delta = c_to - c_from
+    c_pct   = signal_data.get("cvd_move_pct")
+    score   = signal_data.get("div_score")
     ts_str  = pd.Timestamp(ts).strftime("%H:%M UTC")
-    tf_str  = " · ".join(timeframes)
+    tf_str  = "".join(f"[{tf}]" for tf in timeframes)
+
+    cvd_pct_str  = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
+    score_line   = f"Score: Δ{score:.1f}%\n\n" if score is not None else "\n"
 
     return (
-        f"{emoji} <b>{sig}</b>\n"
-        f"{tf_str}\n\n"
-        f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f} ({p_pct:+.2f}%)\n"
-        f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f} ({c_delta:+,.0f})\n\n"
+        f"{emoji} <b>{sig}</b> {tf_str}\n\n"
+        f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f}  [{p_pct:+.2f}%]\n"
+        f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f}{cvd_pct_str}\n"
+        f"{score_line}"
         f"BTC/USDT @ {current_price:,.2f}\n"
         f"{ts_str}"
     )
@@ -822,6 +828,27 @@ def _send_telegram(text: str, image_bytes: Optional[bytes]) -> None:
         log.warning(f"Telegram send failed: {e}")
 
 
+def _append_signal_log(signal_data: dict, timeframes: list, current_price: float) -> None:
+    """Append one row to the signal log CSV. Creates file with header if it doesn't exist."""
+    row = {
+        "timestamp":      pd.Timestamp(signal_data["timestamp"]).isoformat(),
+        "sent_at":        pd.Timestamp.utcnow().isoformat(),
+        "timeframes":     ",".join(timeframes),
+        "signal":         signal_data["signal"],
+        "price_from":     signal_data.get("price_from"),
+        "price_to":       signal_data.get("price_to"),
+        "cvd_from":       signal_data.get("cvd_from"),
+        "cvd_to":         signal_data.get("cvd_to"),
+        "price_move_pct": signal_data.get("price_move_pct"),
+        "cvd_move_pct":   signal_data.get("cvd_move_pct"),
+        "div_score":      signal_data.get("div_score"),
+        "btc_price":      current_price,
+    }
+    df_row = pd.DataFrame([row])
+    write_header = not SIGNAL_LOG_FILE.exists()
+    df_row.to_csv(SIGNAL_LOG_FILE, mode="a", header=write_header, index=False)
+
+
 def _alert_worker(
     signal_data: dict,
     timeframes: list,
@@ -833,6 +860,7 @@ def _alert_worker(
 ) -> None:
     """Background thread: render image, format message, send to Telegram."""
     current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
+    _append_signal_log(signal_data, timeframes, current_price)
     image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf)
     text          = _format_alert_message(signal_data, timeframes, current_price)
     _send_telegram(text, image_bytes)
@@ -894,6 +922,10 @@ def check_and_alert(state: dict) -> None:
             ts_str = pd.Timestamp(signal_data["timestamp"]).isoformat()
             if ts_str == state[tf].get(key):
                 continue  # already alerted for this candle
+            score = signal_data.get("div_score")
+            if score is None or score < MIN_DIV_SCORE:
+                log.info(f"[alert] filtered {tf} {signal_data['signal']} — div_score {score} < {MIN_DIV_SCORE}")
+                continue
             state[tf][key] = ts_str
             sig_name = signal_data["signal"]
             if sig_name not in pending:
