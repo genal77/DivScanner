@@ -769,13 +769,16 @@ def _format_alert_message(signal_data: dict, timeframes: list, current_price: fl
     ts_str  = pd.Timestamp(ts).tz_convert(ZoneInfo("Europe/Warsaw")).strftime("%H:%M (Warsaw)")
     tf_str  = "".join(f"[{tf}]" for tf in timeframes)
 
-    cvd_pct_str  = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
-    score_line   = f"Score: Δ{score:.1f}%\n\n" if score is not None else "\n"
+    net_delta     = c_to - c_from
+    net_delta_str = f"Net Delta: {net_delta:+,.0f} BTC\n"
+    cvd_pct_str   = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
+    score_line    = f"Divergence Score: {score:.1f}%\n\n" if score is not None else "\n"
 
     return (
         f"{emoji} <b>{sig}</b> {tf_str}\n\n"
         f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f}  [{p_pct:+.2f}%]\n"
         f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f}{cvd_pct_str}\n"
+        f"{net_delta_str}"
         f"{score_line}"
         f"BTC/USDT @ {current_price:,.2f}\n"
         f"{ts_str}"
@@ -882,7 +885,7 @@ def check_and_alert(state: dict) -> None:
     from analysis import (
         INTERVAL_MAP, DISPLAY_CANDLES,
         resample_klines, compute_cvd, compute_oi_ohlc,
-        trim_to_candles, get_price_df, detect_spot_signals,
+        trim_to_candles, reset_cvd_origin, get_price_df, detect_spot_signals,
     )
 
     spot_raw    = load_parquet(DATA_DIR / "btc_spot_5m.parquet")
@@ -907,8 +910,8 @@ def check_and_alert(state: dict) -> None:
         futures_rs = resample_klines(futures_raw, pandas_interval)
 
         price_df       = trim_to_candles(get_price_df(spot_rs),                       DISPLAY_CANDLES)
-        cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    _ALL_SPOT_EXCHANGES), DISPLAY_CANDLES)
-        cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_exchanges),   DISPLAY_CANDLES)
+        cvd_spot_df    = reset_cvd_origin(trim_to_candles(compute_cvd(spot_rs,    _ALL_SPOT_EXCHANGES), DISPLAY_CANDLES))
+        cvd_futures_df = reset_cvd_origin(trim_to_candles(compute_cvd(futures_rs, futures_exchanges),   DISPLAY_CANDLES))
         oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),     DISPLAY_CANDLES)
 
         low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
