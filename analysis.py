@@ -477,9 +477,11 @@ def build_figure(
             on="timestamp", how="inner",
         ).reset_index(drop=True)
 
-        if len(merged) >= PIVOT_WINDOW * 2 + 2:
-            p_lows, _  = find_pivot_indices(merged["p_low"])
-            _, p_highs = find_pivot_indices(merged["p_high"])
+        div_lb = pivot_left
+        div_rb = pivot_right
+        if len(merged) >= div_lb + div_rb + 2:
+            p_lows, _  = find_pivot_indices(merged["p_low"],  left_bars=div_lb, right_bars=div_rb)
+            _, p_highs = find_pivot_indices(merged["p_high"], left_bars=div_lb, right_bars=div_rb)
             curr = len(merged) - 1
 
             def draw_line(x0, y0, x1, y1, color, dash, width, row):

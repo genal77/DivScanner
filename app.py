@@ -301,11 +301,12 @@ app.layout = html.Div(
                                         html.Div(style={"width": "100%", "marginBottom": "14px"}, children=[
                                             dcc.Slider(
                                                 id="pivot-lb",
-                                                min=1, max=10, step=1, value=PIVOT_WINDOW,
+                                                min=1, max=15, step=1, value=PIVOT_WINDOW,
                                                 marks={
                                                     1:  {"label": "1",  "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    15: {"label": "15", "style": {"color": _MUTED, "fontSize": "9px"}},
                                                 },
                                                 tooltip={"placement": "top", "always_visible": False},
                                                 className="pivot-slider",
@@ -315,11 +316,12 @@ app.layout = html.Div(
                                         html.Div(style={"width": "100%"}, children=[
                                             dcc.Slider(
                                                 id="pivot-rb",
-                                                min=1, max=10, step=1, value=PIVOT_WINDOW,
+                                                min=1, max=15, step=1, value=PIVOT_WINDOW,
                                                 marks={
                                                     1:  {"label": "1",  "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    15: {"label": "15", "style": {"color": _MUTED, "fontSize": "9px"}},
                                                 },
                                                 tooltip={"placement": "top", "always_visible": False},
                                                 className="pivot-slider",
