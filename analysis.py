@@ -381,7 +381,7 @@ def build_figure(
     fig = make_subplots(
         rows=4, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
+        vertical_spacing=0.01,
         row_heights=[0.40, 0.20, 0.20, 0.20],
     )
 
@@ -540,7 +540,7 @@ def build_figure(
                 hoverinfo="skip",
             ), row=1, col=1)
 
-    # Live signal banner — placed ABOVE chart (in top margin)
+    # Live signal banner — inside chart, top of panel 1
     if active_signals:
         signal_text    = "   |   ".join(f"<b>{label}</b>" for _, label in active_signals)
         dominant_color = active_signals[0][0]
@@ -551,22 +551,22 @@ def build_figure(
             bgcolor="rgba(0,0,0,0.80)",
             bordercolor=dominant_color,
             borderpad=8,
-            xanchor="center", yanchor="bottom",
+            xanchor="center", yanchor="top",
         )
 
-    # Panel labels — at top edge of each panel, yanchor="bottom" so they sit inside
+    # Panel labels — pinned inside each panel just below its top border
     panel_labels = [
         (1.0,   "BTC/USDT  ·  Binance Spot"),
-        (0.604, "CVD Spot  ·  Aggregated  · BTC"),
-        (0.396, "CVD Futures  ·  Aggregated  · BTC"),
-        (0.188, "Open Interest  ·  Binance Futures"),
+        (0.602, "CVD Spot  ·  Aggregated  · BTC"),
+        (0.398, "CVD Futures  ·  Aggregated  · BTC"),
+        (0.194, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
             x=0.005, y=y_paper, xref="paper", yref="paper",
             text=f"<b>{text}</b>", showarrow=False,
             font=dict(size=11, color="rgba(255,255,255,0.65)"),
-            align="left", xanchor="left", yanchor="bottom",
+            align="left", xanchor="left", yanchor="top",
         )
 
     # X-axis range: extend right by 10 empty candles
@@ -603,7 +603,7 @@ def build_figure(
         paper_bgcolor="#111",
         plot_bgcolor="#0d0d0d",
         autosize=True,
-        margin=dict(l=0, r=70, t=40, b=0),
+        margin=dict(l=0, r=70, t=5, b=0),
         showlegend=False,
         hovermode="x unified",
     )
@@ -665,7 +665,7 @@ def build_alert_figure(
     fig = make_subplots(
         rows=4, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
+        vertical_spacing=0.01,
         row_heights=[0.40, 0.20, 0.20, 0.20],
     )
 
@@ -773,7 +773,7 @@ def build_alert_figure(
                     metrics = f"  ·  price {p_pct:+.2f}%  CVD {c_pct:+.2f}%{score_str}"
                 active_signals.append((color, f"{data['signal']}{metrics}"))
 
-    # Banner — placed ABOVE the chart using paper coordinates > 1
+    # Banner — inside chart, top of panel 1
     if active_signals:
         signal_text    = "   |   ".join(f"<b>{label}</b>" for _, label in active_signals)
         dominant_color = active_signals[0][0]
@@ -784,22 +784,22 @@ def build_alert_figure(
             bgcolor="rgba(0,0,0,0.90)",
             bordercolor=dominant_color,
             borderpad=7,
-            xanchor="center", yanchor="bottom",
+            xanchor="center", yanchor="top",
         )
 
-    # Panel labels — positioned at top edge of each panel, in the gap between panels
+    # Panel labels — pinned inside each panel just below its top border
     panel_labels = [
         (1.0,   "BTC/USDT  ·  Binance Spot"),
-        (0.604, "CVD Spot  ·  Aggregated"),
-        (0.396, "CVD Futures  ·  Aggregated"),
-        (0.188, "Open Interest  ·  Binance Futures"),
+        (0.602, "CVD Spot  ·  Aggregated"),
+        (0.398, "CVD Futures  ·  Aggregated"),
+        (0.194, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
             x=0.005, y=y_paper, xref="paper", yref="paper",
             text=f"<b>{text}</b>", showarrow=False,
             font=dict(size=11, color="rgba(255,255,255,0.45)"),
-            align="left", xanchor="left", yanchor="bottom",
+            align="left", xanchor="left", yanchor="top",
         )
 
     # X-axis: 8 ticks across the width, Warsaw time format
@@ -830,7 +830,7 @@ def build_alert_figure(
         template="plotly_dark",
         paper_bgcolor="#111",
         plot_bgcolor="#0d0d0d",
-        margin=dict(l=0, r=55, t=40, b=25),
+        margin=dict(l=0, r=55, t=5, b=25),
         showlegend=False,
         hovermode=False,
     )
