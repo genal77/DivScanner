@@ -270,9 +270,13 @@ def detect_spot_signals(
     price_df:     pd.DataFrame,
     cvd_spot_df:  pd.DataFrame,
     pivot_window: int = PIVOT_WINDOW,
+    cvd_mode:     str = "candle",
 ) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Detect active divergence signals between price and CVD spot.
+
+    cvd_mode: "candle" uses cvd_high/cvd_low at price pivot points;
+              "line"   uses cvd_close at price pivot points.
 
     Returns (low_data, high_data). Each is None or a dict with keys:
       signal, price_from, price_to, cvd_from, cvd_to, timestamp
@@ -284,12 +288,16 @@ def detect_spot_signals(
         price_df[["timestamp", "high", "low"]].rename(
             columns={"high": "p_high", "low": "p_low"}
         ),
-        cvd_spot_df[["timestamp", "cvd_high", "cvd_low"]],
+        cvd_spot_df[["timestamp", "cvd_high", "cvd_low", "cvd_close"]],
         on="timestamp", how="inner",
     ).reset_index(drop=True)
 
     if len(merged) < pivot_window * 2 + 2:
         return None, None
+
+    # CVD column to read at price pivot points
+    cvd_lo_col = "cvd_close" if cvd_mode == "line" else "cvd_low"
+    cvd_hi_col = "cvd_close" if cvd_mode == "line" else "cvd_high"
 
     p_lows, _  = find_pivot_indices(merged["p_low"],  pivot_window)
     _, p_highs = find_pivot_indices(merged["p_high"], pivot_window)
@@ -303,16 +311,16 @@ def detect_spot_signals(
         last_l = p_lows[-1]
         since = merged["p_low"].iloc[last_l + 1: curr + 1]
         if not since.empty and since.min() == merged["p_low"].iloc[curr]:
-            l_pdif = merged["p_low"].iloc[curr]   - merged["p_low"].iloc[last_l]
-            l_cdif = merged["cvd_low"].iloc[curr] - merged["cvd_low"].iloc[last_l]
+            l_pdif = merged["p_low"].iloc[curr]         - merged["p_low"].iloc[last_l]
+            l_cdif = merged[cvd_lo_col].iloc[curr]      - merged[cvd_lo_col].iloc[last_l]
             signal = ""
             if   l_pdif < 0 and l_cdif > 0: signal = "SELLERS EXHAUSTION"
             elif l_pdif > 0 and l_cdif < 0: signal = "SELLERS ABSORPTION"
             if signal:
                 pf = float(merged["p_low"].iloc[last_l])
                 pt = float(merged["p_low"].iloc[curr])
-                cf = float(merged["cvd_low"].iloc[last_l])
-                ct = float(merged["cvd_low"].iloc[curr])
+                cf = float(merged[cvd_lo_col].iloc[last_l])
+                ct = float(merged[cvd_lo_col].iloc[curr])
                 p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
                 low_data = {
                     "signal":         signal,
@@ -331,16 +339,16 @@ def detect_spot_signals(
         last_h = p_highs[-1]
         since = merged["p_high"].iloc[last_h + 1: curr + 1]
         if not since.empty and since.max() == merged["p_high"].iloc[curr]:
-            h_pdif = merged["p_high"].iloc[curr]    - merged["p_high"].iloc[last_h]
-            h_cdif = merged["cvd_high"].iloc[curr]  - merged["cvd_high"].iloc[last_h]
+            h_pdif = merged["p_high"].iloc[curr]        - merged["p_high"].iloc[last_h]
+            h_cdif = merged[cvd_hi_col].iloc[curr]      - merged[cvd_hi_col].iloc[last_h]
             signal = ""
             if   h_pdif > 0 and h_cdif < 0: signal = "BUYERS EXHAUSTION"
             elif h_pdif < 0 and h_cdif > 0: signal = "BUYERS ABSORPTION"
             if signal:
                 pf = float(merged["p_high"].iloc[last_h])
                 pt = float(merged["p_high"].iloc[curr])
-                cf = float(merged["cvd_high"].iloc[last_h])
-                ct = float(merged["cvd_high"].iloc[curr])
+                cf = float(merged[cvd_hi_col].iloc[last_h])
+                ct = float(merged[cvd_hi_col].iloc[curr])
                 p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
                 high_data = {
                     "signal":         signal,
@@ -371,11 +379,16 @@ def build_figure(
     show_pivots:      bool = False,
     pivot_left:       int  = PIVOT_WINDOW,
     pivot_right:      int  = PIVOT_WINDOW,
+    cvd_spot_mode:    str  = "candle",
+    cvd_futures_mode: str  = "candle",
+    oi_mode:          str  = "candle",
 ) -> Tuple[go.Figure, List[dict]]:
     """
     Assemble the 4-panel Plotly figure.
     Returns (fig, active_signal_data) where active_signal_data is a list
     of signal dicts from detect_spot_signals (used for Telegram alerts).
+
+    cvd_spot_mode / cvd_futures_mode / oi_mode: "candle" or "line"
     """
 
     fig = make_subplots(
@@ -392,6 +405,14 @@ def build_figure(
             increasing_line_color=CANDLE_UP,   increasing_fillcolor=CANDLE_UP,
             decreasing_line_color=CANDLE_DOWN, decreasing_fillcolor=CANDLE_DOWN,
             line_width=1,
+        ), row=row, col=1)
+
+    def linechart(df, x, y, name, row, color="#26a69a"):
+        fig.add_trace(go.Scatter(
+            x=df[x], y=df[y],
+            mode="lines",
+            name=name,
+            line=dict(color=color, width=1.5),
         ), row=row, col=1)
 
     # Panel 1 — Price
@@ -421,26 +442,38 @@ def build_figure(
 
     # Panel 2 — CVD Spot
     if not cvd_spot_df.empty:
-        candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
+        if cvd_spot_mode == "line":
+            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="#26a69a")
+        else:
+            candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
 
     # Panel 3 — CVD Futures
     if not cvd_futures_df.empty:
-        candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 3)
+        if cvd_futures_mode == "line":
+            linechart(cvd_futures_df, "timestamp", "cvd_close", "CVD Futures", 3, color="#ab47bc")
+        else:
+            candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 3)
 
     # Panel 4 — OI
     if not oi_df.empty:
-        candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
+        if oi_mode == "line":
+            linechart(oi_df, "timestamp", "close", "Open Interest", 4, color="#ef5350")
+        else:
+            candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals     = []   # (color, label) for banner
     active_signal_data = []   # full dicts for alert system
 
     if show_divergences and not price_df.empty and not cvd_spot_df.empty:
+        cvd_lo_col = "cvd_close" if cvd_spot_mode == "line" else "cvd_low"
+        cvd_hi_col = "cvd_close" if cvd_spot_mode == "line" else "cvd_high"
+
         merged = pd.merge(
             price_df[["timestamp", "high", "low"]].rename(
                 columns={"high": "p_high", "low": "p_low"}
             ),
-            cvd_spot_df[["timestamp", "cvd_high", "cvd_low"]],
+            cvd_spot_df[["timestamp", "cvd_high", "cvd_low", "cvd_close"]],
             on="timestamp", how="inner",
         ).reset_index(drop=True)
 
@@ -459,36 +492,37 @@ def build_figure(
             # Historical low divergences (always drawn)
             for i in range(1, len(p_lows)):
                 p1, p2 = p_lows[i - 1], p_lows[i]
-                pdif = merged["p_low"].iloc[p2]   - merged["p_low"].iloc[p1]
-                cdif = merged["cvd_low"].iloc[p2] - merged["cvd_low"].iloc[p1]
+                pdif = merged["p_low"].iloc[p2]        - merged["p_low"].iloc[p1]
+                cdif = merged[cvd_lo_col].iloc[p2]     - merged[cvd_lo_col].iloc[p1]
                 if   pdif < 0 and cdif > 0: color, dash = "cyan", "dash"
                 elif pdif > 0 and cdif < 0: color, dash = "cyan", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_low"].iloc[p1],   t1, merged["p_low"].iloc[p2],   color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_low"].iloc[p1], t1, merged["cvd_low"].iloc[p2], color, dash, 1.5, 2)
+                draw_line(t0, merged["p_low"].iloc[p1],        t1, merged["p_low"].iloc[p2],        color, dash, 1.5, 1)
+                draw_line(t0, merged[cvd_lo_col].iloc[p1],     t1, merged[cvd_lo_col].iloc[p2],     color, dash, 1.5, 2)
 
             # Historical high divergences (always drawn)
             for i in range(1, len(p_highs)):
                 p1, p2 = p_highs[i - 1], p_highs[i]
-                pdif = merged["p_high"].iloc[p2]    - merged["p_high"].iloc[p1]
-                cdif = merged["cvd_high"].iloc[p2]  - merged["cvd_high"].iloc[p1]
+                pdif = merged["p_high"].iloc[p2]       - merged["p_high"].iloc[p1]
+                cdif = merged[cvd_hi_col].iloc[p2]     - merged[cvd_hi_col].iloc[p1]
                 if   pdif > 0 and cdif < 0: color, dash = "magenta", "dash"
                 elif pdif < 0 and cdif > 0: color, dash = "magenta", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_high"].iloc[p1],   t1, merged["p_high"].iloc[p2],   color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_high"].iloc[p1], t1, merged["cvd_high"].iloc[p2], color, dash, 1.5, 2)
+                draw_line(t0, merged["p_high"].iloc[p1],       t1, merged["p_high"].iloc[p2],       color, dash, 1.5, 1)
+                draw_line(t0, merged[cvd_hi_col].iloc[p1],     t1, merged[cvd_hi_col].iloc[p2],     color, dash, 1.5, 2)
 
             # Live signal — current candle vs last confirmed pivot
-            low_data, high_data = detect_spot_signals(price_df, cvd_spot_df)
+            low_data, high_data = detect_spot_signals(price_df, cvd_spot_df, cvd_mode=cvd_spot_mode)
             for data in (low_data, high_data):
                 if not data:
                     continue
                 color = "cyan" if "SELLER" in data["signal"] else "magenta"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
                 is_low = "SELLER" in data["signal"]
-                p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
+                p_col  = "p_low"    if is_low else "p_high"
+                c_col  = cvd_lo_col if is_low else cvd_hi_col
                 pivots = p_lows if is_low else p_highs
                 if pivots:
                     last_p = pivots[-1]

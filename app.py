@@ -123,7 +123,7 @@ app.layout = html.Div(
     },
     children=[
 
-        # ── Persistent state store ────────────────────────────────────────
+        # ── Persistent state stores ───────────────────────────────────────
         dcc.Store(
             id="exchange-state",
             storage_type="local",
@@ -131,6 +131,11 @@ app.layout = html.Div(
                 "spot":    list(SPOT_EXCHANGES.keys()),
                 "futures": list(FUTURES_EXCHANGES.keys()),
             },
+        ),
+        dcc.Store(
+            id="chart-modes",
+            storage_type="local",
+            data={"cvd_spot": "candle", "cvd_futures": "candle", "oi": "candle"},
         ),
 
         # ── Top controls bar ──────────────────────────────────────────────
@@ -231,6 +236,14 @@ app.layout = html.Div(
                                             inputStyle=_CHECKLIST_INPUT,
                                             labelStyle=_SIDEBAR_LABEL,
                                         ),
+                                        dcc.RadioItems(
+                                            id="cvd-spot-mode",
+                                            options=[{"label": "Candle", "value": "candle"}, {"label": "Line", "value": "line"}],
+                                            value="candle",
+                                            inline=True,
+                                            inputStyle={**_CHECKLIST_INPUT, "marginTop": "8px"},
+                                            labelStyle={**_CHECKLIST_LABEL, "fontSize": "11px"},
+                                        ),
                                     ],
                                 ),
 
@@ -245,6 +258,30 @@ app.layout = html.Div(
                                             value=list(FUTURES_EXCHANGES.keys()),
                                             inputStyle=_CHECKLIST_INPUT,
                                             labelStyle=_SIDEBAR_LABEL,
+                                        ),
+                                        dcc.RadioItems(
+                                            id="cvd-futures-mode",
+                                            options=[{"label": "Candle", "value": "candle"}, {"label": "Line", "value": "line"}],
+                                            value="candle",
+                                            inline=True,
+                                            inputStyle={**_CHECKLIST_INPUT, "marginTop": "8px"},
+                                            labelStyle={**_CHECKLIST_LABEL, "fontSize": "11px"},
+                                        ),
+                                    ],
+                                ),
+
+                                # Open Interest section
+                                html.Div(
+                                    style={"marginBottom": "18px"},
+                                    children=[
+                                        html.Div("Open Interest", style=_SECTION_HEADER),
+                                        dcc.RadioItems(
+                                            id="oi-mode",
+                                            options=[{"label": "Candle", "value": "candle"}, {"label": "Line", "value": "line"}],
+                                            value="candle",
+                                            inline=True,
+                                            inputStyle=_CHECKLIST_INPUT,
+                                            labelStyle={**_CHECKLIST_LABEL, "fontSize": "11px"},
                                         ),
                                     ],
                                 ),
@@ -335,6 +372,32 @@ def save_exchange_state(spot, futures):
 
 
 @app.callback(
+    Output("cvd-spot-mode",    "value"),
+    Output("cvd-futures-mode", "value"),
+    Output("oi-mode",          "value"),
+    Input("chart-modes", "data"),
+    prevent_initial_call=False,
+)
+def restore_chart_modes(data):
+    """On page load, restore chart mode selections from localStorage."""
+    if not data:
+        return "candle", "candle", "candle"
+    return data.get("cvd_spot", "candle"), data.get("cvd_futures", "candle"), data.get("oi", "candle")
+
+
+@app.callback(
+    Output("chart-modes", "data"),
+    Input("cvd-spot-mode",    "value"),
+    Input("cvd-futures-mode", "value"),
+    Input("oi-mode",          "value"),
+    prevent_initial_call=True,
+)
+def save_chart_modes(cvd_spot, cvd_futures, oi):
+    """Persist chart mode selections to localStorage on every change."""
+    return {"cvd_spot": cvd_spot, "cvd_futures": cvd_futures, "oi": oi}
+
+
+@app.callback(
     Output("sidebar-content", "style"),
     Output("sidebar", "style"),
     Output("sidebar-toggle", "children"),
@@ -362,8 +425,12 @@ def toggle_sidebar(n_clicks, current_label):
     Input("show-pivots", "value"),
     Input("pivot-lb", "value"),
     Input("pivot-rb", "value"),
+    Input("cvd-spot-mode",    "value"),
+    Input("cvd-futures-mode", "value"),
+    Input("oi-mode",          "value"),
 )
-def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_val, pivot_lb, pivot_rb):
+def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_val,
+                 pivot_lb, pivot_rb, cvd_spot_mode, cvd_futures_mode, oi_mode):
     """
     Triggered every 10s (auto-refresh) or on any control change.
     Reloads data from disk, resamples, computes CVD/OI, rebuilds figure.
@@ -377,10 +444,10 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
     spot_rs    = resample_klines(spot_raw,    pandas_interval)
     futures_rs = resample_klines(futures_raw, pandas_interval)
 
-    price_df       = trim_to_candles(get_price_df(spot_rs),                          DISPLAY_CANDLES)
+    price_df       = trim_to_candles(get_price_df(spot_rs),                           DISPLAY_CANDLES)
     cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    spot_selected     or []), DISPLAY_CANDLES)
     cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_selected  or []), DISPLAY_CANDLES)
-    oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),        DISPLAY_CANDLES)
+    oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),         DISPLAY_CANDLES)
 
     price_df       = to_warsaw(price_df)
     cvd_spot_df    = to_warsaw(cvd_spot_df)
@@ -391,8 +458,11 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
         price_df, cvd_spot_df, cvd_futures_df, oi_df,
         interval_str=interval_str,
         show_pivots=bool(show_pivots_val),
-        pivot_left=pivot_lb or PIVOT_WINDOW,
+        pivot_left=pivot_lb  or PIVOT_WINDOW,
         pivot_right=pivot_rb or PIVOT_WINDOW,
+        cvd_spot_mode=cvd_spot_mode    or "candle",
+        cvd_futures_mode=cvd_futures_mode or "candle",
+        oi_mode=oi_mode                or "candle",
     )
     now_str = "Updated " + datetime.now(_WARSAW).strftime("%H:%M:%S (Warsaw)")
 
