@@ -185,6 +185,27 @@ def get_price_df(spot_df: pd.DataFrame) -> pd.DataFrame:
 # DIVERGENCE DETECTION  (pure — no Plotly)
 # ---------------------------------------------------------------------------
 
+def _dedup_consecutive_pivots(indices: list, arr) -> list:
+    """
+    Remove duplicate pivots caused by flat candles (identical adjacent values).
+
+    When two consecutive candles share the same high/low, both pass the == min/max
+    check and both get added as pivots. This keeps only the first of each such run,
+    so divergence lines always anchor to a single well-defined pivot.
+    """
+    if not indices:
+        return indices
+    result = [indices[0]]
+    for i in range(1, len(indices)):
+        prev_idx = indices[i - 1]
+        curr_idx = indices[i]
+        # Skip if this index is a direct continuation of the previous flat run
+        if curr_idx == prev_idx + 1 and arr[curr_idx] == arr[prev_idx]:
+            continue
+        result.append(curr_idx)
+    return result
+
+
 def find_pivot_indices(
     series: pd.Series,
     window: int = PIVOT_WINDOW,
@@ -210,6 +231,8 @@ def find_pivot_indices(
             lows.append(i)
         if arr[i] == window_slice.max():
             highs.append(i)
+    lows  = _dedup_consecutive_pivots(lows,  arr)
+    highs = _dedup_consecutive_pivots(highs, arr)
     return lows, highs
 
 
