@@ -291,7 +291,8 @@ def detect_spot_signals(
     if len(merged) < pivot_window * 2 + 2:
         return None, None
 
-    p_lows, p_highs = find_pivot_indices(merged["p_low"], pivot_window)
+    p_lows, _  = find_pivot_indices(merged["p_low"],  pivot_window)
+    _, p_highs = find_pivot_indices(merged["p_high"], pivot_window)
     curr = len(merged) - 1
 
     low_data:  Optional[dict] = None
@@ -444,7 +445,8 @@ def build_figure(
         ).reset_index(drop=True)
 
         if len(merged) >= PIVOT_WINDOW * 2 + 2:
-            p_lows, p_highs = find_pivot_indices(merged["p_low"])
+            p_lows, _  = find_pivot_indices(merged["p_low"])
+            _, p_highs = find_pivot_indices(merged["p_high"])
             curr = len(merged) - 1
 
             def draw_line(x0, y0, x1, y1, color, dash, width, row):
@@ -713,7 +715,8 @@ def build_alert_figure(
         ).reset_index(drop=True)
 
         if len(merged) >= PIVOT_WINDOW * 2 + 2:
-            p_lows, p_highs = find_pivot_indices(merged["p_low"])
+            p_lows, _  = find_pivot_indices(merged["p_low"])
+            _, p_highs = find_pivot_indices(merged["p_high"])
             curr = len(merged) - 1
 
             def draw_line(x0, y0, x1, y1, color, dash, width, row):
