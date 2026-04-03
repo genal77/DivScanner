@@ -747,10 +747,16 @@ def _save_alert_state(state: dict) -> None:
         pass
 
 
-def _format_alert_message(signal_data: dict, timeframes: list, current_price: float) -> str:
+def _format_alert_message(
+    signal_data: dict,
+    timeframes: list,
+    current_price: float,
+    oi_df: pd.DataFrame,
+) -> str:
     """
     Format Telegram message text for a divergence alert.
     timeframes: list of TF strings sorted highest-first, e.g. ["1h", "15m", "5m"]
+    oi_df: trimmed OI DataFrame used to compute OI change between pivots.
     """
     sig    = signal_data["signal"]
     emoji  = _SIGNAL_EMOJI.get(sig, "⚪")
@@ -774,11 +780,29 @@ def _format_alert_message(signal_data: dict, timeframes: list, current_price: fl
     cvd_pct_str   = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
     score_line    = f"Divergence Score: {score:.1f}%\n\n" if score is not None else "\n"
 
+    # OI context: compare OI at pivot A vs pivot B timestamps
+    oi_str = ""
+    pivot_from_ts = signal_data.get("pivot_from_ts")
+    if not oi_df.empty and pivot_from_ts is not None:
+        try:
+            oi_sorted = oi_df.set_index("timestamp").sort_index()
+            oi_a = float(oi_sorted["close"].asof(pd.Timestamp(pivot_from_ts)))
+            oi_b = float(oi_sorted["close"].asof(pd.Timestamp(ts)))
+            if pd.notna(oi_a) and pd.notna(oi_b) and oi_a > 0:
+                oi_delta = oi_b - oi_a
+                oi_pct   = oi_delta / oi_a * 100
+                oi_arrow = "↑" if oi_delta >= 0 else "↓"
+                oi_label = "new positions" if oi_delta >= 0 else "covering"
+                oi_str   = f"OI:    {oi_arrow} {oi_delta:+,.0f} BTC ({oi_pct:+.2f}%) · {oi_label}\n"
+        except Exception:
+            pass
+
     return (
         f"{emoji} <b>{sig}</b> {tf_str}\n\n"
         f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f}  [{p_pct:+.2f}%]\n"
         f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f}{cvd_pct_str}\n"
         f"{net_delta_str}"
+        f"{oi_str}"
         f"{score_line}"
         f"BTC/USDT @ {current_price:,.2f}\n"
         f"{ts_str}"
@@ -865,7 +889,7 @@ def _alert_worker(
     current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
     _append_signal_log(signal_data, timeframes, current_price)
     image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf)
-    text          = _format_alert_message(signal_data, timeframes, current_price)
+    text          = _format_alert_message(signal_data, timeframes, current_price, oi_df)
     _send_telegram(text, image_bytes)
     log.info(f"[alert] {' · '.join(timeframes)} · {signal_data['signal']} → Telegram sent")
 
