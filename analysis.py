@@ -384,7 +384,7 @@ def build_figure(
     oi_mode:          str  = "candle",
 ) -> Tuple[go.Figure, List[dict]]:
     """
-    Assemble the 4-panel Plotly figure.
+    Assemble the 5-panel Plotly figure.
     Returns (fig, active_signal_data) where active_signal_data is a list
     of signal dicts from detect_spot_signals (used for Telegram alerts).
 
@@ -392,10 +392,10 @@ def build_figure(
     """
 
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=5, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.01,
-        row_heights=[0.40, 0.20, 0.20, 0.20],
+        row_heights=[0.36, 0.18, 0.18, 0.18, 0.10],
     )
 
     def candlestick(df, x, o, h, l, c, name, row):
@@ -460,6 +460,18 @@ def build_figure(
             linechart(oi_df, "timestamp", "close", "Open Interest", 4, color="#ef5350")
         else:
             candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
+
+    # Panel 5 — Delta Spot
+    if not cvd_spot_df.empty:
+        delta = cvd_spot_df["cvd_close"] - cvd_spot_df["cvd_open"]
+        bar_colors = [CANDLE_UP if d >= 0 else CANDLE_DOWN for d in delta]
+        fig.add_trace(go.Bar(
+            x=cvd_spot_df["timestamp"],
+            y=delta,
+            marker_color=bar_colors,
+            marker_line_width=0,
+            name="Delta Spot",
+        ), row=5, col=1)
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals     = []   # (color, label) for banner
@@ -592,10 +604,11 @@ def build_figure(
 
     # Panel labels — pinned inside each panel just below its top border
     panel_labels = [
-        (1.0,   "BTC/USDT  ·  Binance Spot"),
-        (0.602, "CVD Spot  ·  Aggregated  · BTC"),
-        (0.398, "CVD Futures  ·  Aggregated  · BTC"),
-        (0.194, "Open Interest  ·  Binance Futures"),
+        (1.000, "BTC/USDT  ·  Binance Spot"),
+        (0.644, "CVD Spot  ·  Aggregated  · BTC"),
+        (0.462, "CVD Futures  ·  Aggregated  · BTC"),
+        (0.279, "Open Interest  ·  Binance Futures"),
+        (0.096, "Delta Spot  ·  Aggregated  · BTC"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
