@@ -655,6 +655,7 @@ def build_figure(
         margin=dict(l=0, r=70, t=5, b=0),
         showlegend=False,
         hovermode="x unified",
+        hoversubplots="axis",
     )
 
     return fig, active_signal_data
