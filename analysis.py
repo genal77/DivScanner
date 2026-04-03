@@ -145,6 +145,25 @@ def compute_cvd(klines_df: pd.DataFrame, selected_exchanges: List[str]) -> pd.Da
     return agg
 
 
+def reset_cvd_origin(cvd_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize CVD to start from 0 at the first visible candle.
+
+    Subtracts the cvd_open of the first row from all CVD columns so the
+    curve always begins at 0 regardless of historical accumulation.
+    Call this after trim_to_candles, not before.
+    """
+    if cvd_df.empty:
+        return cvd_df
+    df = cvd_df.copy()
+    origin = df["cvd_open"].iloc[0]
+    df["cvd_open"]  -= origin
+    df["cvd_close"] -= origin
+    df["cvd_high"]  -= origin
+    df["cvd_low"]   -= origin
+    return df
+
+
 def compute_oi_ohlc(oi_df: pd.DataFrame, pandas_interval: str) -> pd.DataFrame:
     """Resample 1m OI snapshots into OHLC candles for the target interval."""
     if oi_df.empty:

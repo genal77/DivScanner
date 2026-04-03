@@ -35,7 +35,7 @@ from analysis import (
     SPOT_EXCHANGES, FUTURES_EXCHANGES,
     load_parquet, resample_klines, compute_cvd, compute_oi_ohlc,
     to_warsaw,
-    trim_to_candles, get_price_df, build_figure,
+    trim_to_candles, reset_cvd_origin, get_price_df, build_figure,
 )
 
 # ---------------------------------------------------------------------------
@@ -447,8 +447,8 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
     futures_rs = resample_klines(futures_raw, pandas_interval)
 
     price_df       = trim_to_candles(get_price_df(spot_rs),                           DISPLAY_CANDLES)
-    cvd_spot_df    = trim_to_candles(compute_cvd(spot_rs,    spot_selected     or []), DISPLAY_CANDLES)
-    cvd_futures_df = trim_to_candles(compute_cvd(futures_rs, futures_selected  or []), DISPLAY_CANDLES)
+    cvd_spot_df    = reset_cvd_origin(trim_to_candles(compute_cvd(spot_rs,    spot_selected     or []), DISPLAY_CANDLES))
+    cvd_futures_df = reset_cvd_origin(trim_to_candles(compute_cvd(futures_rs, futures_selected  or []), DISPLAY_CANDLES))
     oi_df          = trim_to_candles(compute_oi_ohlc(oi_raw, pandas_interval),         DISPLAY_CANDLES)
 
     price_df       = to_warsaw(price_df)
