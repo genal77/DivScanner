@@ -635,9 +635,10 @@ def build_figure(
         dtick=dtick,
         tickfont=dict(color="rgba(255,255,255,0.45)"),
         showspikes=True,
-        spikecolor="#555",
+        spikecolor="rgba(255,255,255,0.3)",
         spikethickness=1,
         spikemode="across",
+        spikesnap="cursor",
     )
     fig.update_yaxes(
         side="right",
@@ -654,7 +655,7 @@ def build_figure(
         autosize=True,
         margin=dict(l=0, r=70, t=5, b=0),
         showlegend=False,
-        hovermode="x unified",
+        hovermode="x",
         hoversubplots="axis",
     )
 
