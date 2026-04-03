@@ -54,10 +54,10 @@ FUTURES_EXCHANGES = {
 }
 
 SIGNAL_EMOJI = {
-    "SELLERS EXHAUSTION": "🟢",
-    "SELLERS ABSORPTION": "🔵",
-    "BUYERS EXHAUSTION":  "🔴",
-    "BUYERS ABSORPTION":  "🟠",
+    "SELLING EXHAUSTION": "🟢",
+    "SELLING ABSORPTION": "🔵",
+    "BUYING EXHAUSTION":  "🔴",
+    "BUYING ABSORPTION":  "🟠",
 }
 
 CANDLE_UP   = "#4caf50"
@@ -333,8 +333,8 @@ def detect_spot_signals(
             l_pdif = merged["p_low"].iloc[curr]         - merged["p_low"].iloc[last_l]
             l_cdif = merged[cvd_lo_col].iloc[curr]      - merged[cvd_lo_col].iloc[last_l]
             signal = ""
-            if   l_pdif < 0 and l_cdif > 0: signal = "SELLERS EXHAUSTION"
-            elif l_pdif > 0 and l_cdif < 0: signal = "SELLERS ABSORPTION"
+            if   l_pdif < 0 and l_cdif > 0: signal = "SELLING EXHAUSTION"
+            elif l_pdif > 0 and l_cdif < 0: signal = "SELLING ABSORPTION"
             if signal:
                 pf = float(merged["p_low"].iloc[last_l])
                 pt = float(merged["p_low"].iloc[curr])
@@ -362,8 +362,8 @@ def detect_spot_signals(
             h_pdif = merged["p_high"].iloc[curr]        - merged["p_high"].iloc[last_h]
             h_cdif = merged[cvd_hi_col].iloc[curr]      - merged[cvd_hi_col].iloc[last_h]
             signal = ""
-            if   h_pdif > 0 and h_cdif < 0: signal = "BUYERS EXHAUSTION"
-            elif h_pdif < 0 and h_cdif > 0: signal = "BUYERS ABSORPTION"
+            if   h_pdif > 0 and h_cdif < 0: signal = "BUYING EXHAUSTION"
+            elif h_pdif < 0 and h_cdif > 0: signal = "BUYING ABSORPTION"
             if signal:
                 pf = float(merged["p_high"].iloc[last_h])
                 pt = float(merged["p_high"].iloc[curr])

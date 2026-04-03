@@ -716,10 +716,10 @@ MIN_DIV_SCORE    = 5.0   # minimum div_score (%) to trigger an alert — tune af
 ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
 
 _SIGNAL_EMOJI = {
-    "SELLERS EXHAUSTION": "🔵",
-    "SELLERS ABSORPTION": "🟢",
-    "BUYERS EXHAUSTION":  "🟠",
-    "BUYERS ABSORPTION":  "🔴" 
+    "SELLING EXHAUSTION": "🔵",
+    "SELLING ABSORPTION": "🟢",
+    "BUYING EXHAUSTION":  "🟠",
+    "BUYING ABSORPTION":  "🔴" 
 }
 
 # All spot exchanges used for CVD aggregation (mirrors app.py default)
