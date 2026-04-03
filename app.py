@@ -472,6 +472,41 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
 
 
 # ---------------------------------------------------------------------------
+# CROSSHAIR — clientside callback draws a full-height vertical line on hover
+# ---------------------------------------------------------------------------
+
+app.clientside_callback(
+    """
+    function(hoverData, figure) {
+        if (!hoverData || !figure) return window.dash_clientside.no_update;
+
+        var x = hoverData.points[0].x;
+        var shapes = (figure.layout.shapes || []).filter(function(s) {
+            return s.name !== 'crosshair';
+        });
+        shapes.push({
+            name: 'crosshair',
+            type: 'line',
+            x0: x, x1: x,
+            y0: 0, y1: 1,
+            xref: 'x', yref: 'paper',
+            line: { color: 'rgba(255,255,255,0.25)', width: 1, dash: 'solid' }
+        });
+
+        return {
+            ...figure,
+            layout: { ...figure.layout, shapes: shapes }
+        };
+    }
+    """,
+    Output("main-chart", "figure", allow_duplicate=True),
+    Input("main-chart", "hoverData"),
+    State("main-chart", "figure"),
+    prevent_initial_call=True,
+)
+
+
+# ---------------------------------------------------------------------------
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 
