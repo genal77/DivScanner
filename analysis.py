@@ -415,9 +415,21 @@ def build_figure(
             line=dict(color=color, width=1.5),
         ), row=row, col=1)
 
+    def spike_trigger(df, x, row):
+        """Invisible scatter trace that triggers crosshair propagation across panels.
+        go.Candlestick and go.Bar don't propagate spike lines to linked axes — Scatter does."""
+        fig.add_trace(go.Scatter(
+            x=df[x], y=[None] * len(df),
+            mode="markers",
+            marker=dict(opacity=0, size=1),
+            hoverinfo="skip",
+            showlegend=False,
+        ), row=row, col=1)
+
     # Panel 1 — Price
     if not price_df.empty:
         candlestick(price_df, "timestamp", "open", "high", "low", "close", "BTC/USDT", 1)
+        spike_trigger(price_df, "timestamp", 1)
 
         # Current price: horizontal dashed line + label on the right y-axis
         last_price = price_df["close"].iloc[-1]
@@ -446,6 +458,7 @@ def build_figure(
             linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="#2196f3")
         else:
             candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
+            spike_trigger(cvd_spot_df, "timestamp", 2)
 
     # Panel 3 — CVD Futures
     if not cvd_futures_df.empty:
@@ -453,6 +466,7 @@ def build_figure(
             linechart(cvd_futures_df, "timestamp", "cvd_close", "CVD Futures", 3, color="#ab47bc")
         else:
             candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 3)
+            spike_trigger(cvd_futures_df, "timestamp", 3)
 
     # Panel 4 — OI
     if not oi_df.empty:
@@ -460,6 +474,7 @@ def build_figure(
             linechart(oi_df, "timestamp", "close", "Open Interest", 4, color="#ef5350")
         else:
             candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
+            spike_trigger(oi_df, "timestamp", 4)
 
     # Panel 5 — Delta Spot
     if not cvd_spot_df.empty:
@@ -472,6 +487,7 @@ def build_figure(
             marker_line_width=0,
             name="Delta Spot",
         ), row=5, col=1)
+        spike_trigger(cvd_spot_df, "timestamp", 5)
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals     = []   # (color, label) for banner
