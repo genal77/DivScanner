@@ -60,7 +60,7 @@ SIGNAL_EMOJI = {
     "BUYERS ABSORPTION":  "🟠",
 }
 
-CANDLE_UP   = "#26a69a"
+CANDLE_UP   = "#4caf50"
 CANDLE_DOWN = "#ef5350"
 
 # ---------------------------------------------------------------------------
@@ -443,7 +443,7 @@ def build_figure(
     # Panel 2 — CVD Spot
     if not cvd_spot_df.empty:
         if cvd_spot_mode == "line":
-            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="#26a69a")
+            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="#2196f3")
         else:
             candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
 
