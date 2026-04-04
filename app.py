@@ -142,7 +142,8 @@ app.layout = html.Div(
         dcc.Tabs(
             id="main-tabs",
             value="chart",
-            style={"flexShrink": "0"},
+            style={"flex": "1", "minHeight": "0", "display": "flex", "flexDirection": "column"},
+            content_style={"flex": "1", "minHeight": "0", "display": "flex", "flexDirection": "column"},
             colors={"border": _BORDER, "primary": "#26a69a", "background": _PANEL},
             children=[
 
@@ -151,7 +152,7 @@ app.layout = html.Div(
                 value="chart",
                 style={"backgroundColor": _PANEL, "color": _MUTED, "border": "none", "padding": "6px 18px"},
                 selected_style={"backgroundColor": _DARK, "color": "white", "border": "none", "borderBottom": f"2px solid #26a69a", "padding": "6px 18px"},
-                children=[
+                children=[html.Div(style={"display": "flex", "flexDirection": "column", "flex": "1", "minHeight": "0"}, children=[
 
         # ── Top controls bar ──────────────────────────────────────────────
         html.Div(
@@ -352,7 +353,7 @@ app.layout = html.Div(
             ],
         ),
 
-                ]),  # end Tab: Chart
+                ])]),  # end wrapper div + end Tab: Chart
 
             dcc.Tab(
                 label="Signal Log",
