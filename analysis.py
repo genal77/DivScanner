@@ -545,7 +545,7 @@ def build_figure(
     # Panel 2 — CVD Spot
     if not cvd_spot_df.empty:
         if cvd_spot_mode == "line":
-            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="#2196f3")
+            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="white")
         else:
             candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
             spike_trigger(cvd_spot_df, "timestamp", 2)
@@ -614,8 +614,8 @@ def build_figure(
                 p1, p2 = p_lows[i - 1], p_lows[i]
                 pdif = merged["p_low"].iloc[p2]        - merged["p_low"].iloc[p1]
                 cdif = merged[cvd_lo_col].iloc[p2]     - merged[cvd_lo_col].iloc[p1]
-                if   pdif < 0 and cdif > 0: color, dash = "cyan", "dash"
-                elif pdif > 0 and cdif < 0: color, dash = "cyan", "solid"
+                if   pdif < 0 and cdif > 0: color, dash = "#2196f3", "dash"
+                elif pdif > 0 and cdif < 0: color, dash = "#2196f3", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 draw_line(t0, merged["p_low"].iloc[p1],        t1, merged["p_low"].iloc[p2],        color, dash, 1.5, 1)
@@ -626,8 +626,8 @@ def build_figure(
                 p1, p2 = p_highs[i - 1], p_highs[i]
                 pdif = merged["p_high"].iloc[p2]       - merged["p_high"].iloc[p1]
                 cdif = merged[cvd_hi_col].iloc[p2]     - merged[cvd_hi_col].iloc[p1]
-                if   pdif > 0 and cdif < 0: color, dash = "magenta", "dash"
-                elif pdif < 0 and cdif > 0: color, dash = "magenta", "solid"
+                if   pdif > 0 and cdif < 0: color, dash = "orange", "dash"
+                elif pdif < 0 and cdif > 0: color, dash = "orange", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 draw_line(t0, merged["p_high"].iloc[p1],       t1, merged["p_high"].iloc[p2],       color, dash, 1.5, 1)
@@ -638,7 +638,7 @@ def build_figure(
             for data in (low_data, high_data):
                 if not data:
                     continue
-                color = "cyan" if "SELLER" in data["signal"] else "magenta"
+                color = "#2196f3" if "SELLER" in data["signal"] else "orange"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
                 is_low = "SELLER" in data["signal"]
                 p_col  = "p_low"    if is_low else "p_high"
@@ -887,8 +887,8 @@ def build_alert_figure(
                 p1, p2 = p_lows[i - 1], p_lows[i]
                 pdif = merged["p_low"].iloc[p2]   - merged["p_low"].iloc[p1]
                 cdif = merged["cvd_low"].iloc[p2] - merged["cvd_low"].iloc[p1]
-                if   pdif < 0 and cdif > 0: color, dash = "cyan", "dash"
-                elif pdif > 0 and cdif < 0: color, dash = "cyan", "solid"
+                if   pdif < 0 and cdif > 0: color, dash = "#2196f3", "dash"
+                elif pdif > 0 and cdif < 0: color, dash = "#2196f3", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 draw_line(t0, merged["p_low"].iloc[p1],   t1, merged["p_low"].iloc[p2],   color, dash, 1.5, 1)
@@ -898,8 +898,8 @@ def build_alert_figure(
                 p1, p2 = p_highs[i - 1], p_highs[i]
                 pdif = merged["p_high"].iloc[p2]   - merged["p_high"].iloc[p1]
                 cdif = merged["cvd_high"].iloc[p2] - merged["cvd_high"].iloc[p1]
-                if   pdif > 0 and cdif < 0: color, dash = "magenta", "dash"
-                elif pdif < 0 and cdif > 0: color, dash = "magenta", "solid"
+                if   pdif > 0 and cdif < 0: color, dash = "orange", "dash"
+                elif pdif < 0 and cdif > 0: color, dash = "orange", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 draw_line(t0, merged["p_high"].iloc[p1],   t1, merged["p_high"].iloc[p2],   color, dash, 1.5, 1)
@@ -909,7 +909,7 @@ def build_alert_figure(
             for data in (low_data, high_data):
                 if not data:
                     continue
-                color = "cyan" if "SELLER" in data["signal"] else "magenta"
+                color = "#2196f3" if "SELLER" in data["signal"] else "orange"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
                 is_low = "SELLER" in data["signal"]
                 p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
