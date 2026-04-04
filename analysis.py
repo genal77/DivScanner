@@ -602,6 +602,12 @@ def build_figure(
             _, p_highs = find_pivot_indices(merged["p_high"], left_bars=div_lb, right_bars=div_rb)
             curr = len(merged) - 1
 
+            # Offset for CVD divergence lines: 25% of visible CVD range.
+            # Blue (selling) lines drawn below CVD, orange (buying) lines above CVD.
+            # Maintains original slope while keeping lines readable and separate from curve.
+            cvd_vals   = merged["cvd_close"]
+            cvd_offset = (cvd_vals.max() - cvd_vals.min()) * 0.25
+
             def draw_line(x0, y0, x1, y1, color, dash, width, row):
                 fig.add_shape(
                     type="line", x0=x0, y0=y0, x1=x1, y1=y1,
@@ -618,8 +624,8 @@ def build_figure(
                 elif pdif > 0 and cdif < 0: color, dash = "#2196f3", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_low"].iloc[p1],        t1, merged["p_low"].iloc[p2],        color, dash, 1.5, 1)
-                draw_line(t0, merged[cvd_lo_col].iloc[p1],     t1, merged[cvd_lo_col].iloc[p2],     color, dash, 1.5, 2)
+                draw_line(t0, merged["p_low"].iloc[p1],                       t1, merged["p_low"].iloc[p2],                       color, dash, 1.5, 1)
+                draw_line(t0, merged[cvd_lo_col].iloc[p1] - cvd_offset,       t1, merged[cvd_lo_col].iloc[p2] - cvd_offset,       color, dash, 1.5, 2)
 
             # Historical high divergences (always drawn)
             for i in range(1, len(p_highs)):
@@ -630,8 +636,8 @@ def build_figure(
                 elif pdif < 0 and cdif > 0: color, dash = "orange", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_high"].iloc[p1],       t1, merged["p_high"].iloc[p2],       color, dash, 1.5, 1)
-                draw_line(t0, merged[cvd_hi_col].iloc[p1],     t1, merged[cvd_hi_col].iloc[p2],     color, dash, 1.5, 2)
+                draw_line(t0, merged["p_high"].iloc[p1],                      t1, merged["p_high"].iloc[p2],                      color, dash, 1.5, 1)
+                draw_line(t0, merged[cvd_hi_col].iloc[p1] + cvd_offset,       t1, merged[cvd_hi_col].iloc[p2] + cvd_offset,       color, dash, 1.5, 2)
 
             # Live signal — current candle vs last confirmed pivot
             low_data, high_data = detect_spot_signals(price_df, cvd_spot_df, cvd_mode=cvd_spot_mode)
@@ -643,12 +649,13 @@ def build_figure(
                 is_low = "SELLER" in data["signal"]
                 p_col  = "p_low"    if is_low else "p_high"
                 c_col  = cvd_lo_col if is_low else cvd_hi_col
+                sign   = -1         if is_low else +1   # below for blue, above for orange
                 pivots = p_lows if is_low else p_highs
                 if pivots:
                     last_p = pivots[-1]
                     t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
                     draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
-                    draw_line(t0, merged[c_col].iloc[last_p], t1, merged[c_col].iloc[curr], color, dash, 3, 2)
+                    draw_line(t0, merged[c_col].iloc[last_p] + sign * cvd_offset, t1, merged[c_col].iloc[curr] + sign * cvd_offset, color, dash, 3, 2)
                 p_pct = data.get("price_move_pct")
                 c_pct = data.get("cvd_move_pct")
                 score = data.get("div_score")
@@ -876,6 +883,8 @@ def build_alert_figure(
             _, p_highs = find_pivot_indices(merged["p_high"])
             curr = len(merged) - 1
 
+            cvd_offset = (cvd_spot_df["cvd_close"].max() - cvd_spot_df["cvd_close"].min()) * 0.25
+
             def draw_line(x0, y0, x1, y1, color, dash, width, row):
                 fig.add_shape(
                     type="line", x0=x0, y0=y0, x1=x1, y1=y1,
@@ -891,8 +900,8 @@ def build_alert_figure(
                 elif pdif > 0 and cdif < 0: color, dash = "#2196f3", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_low"].iloc[p1],   t1, merged["p_low"].iloc[p2],   color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_low"].iloc[p1], t1, merged["cvd_low"].iloc[p2], color, dash, 1.5, 2)
+                draw_line(t0, merged["p_low"].iloc[p1],                    t1, merged["p_low"].iloc[p2],                    color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_low"].iloc[p1] - cvd_offset,     t1, merged["cvd_low"].iloc[p2] - cvd_offset,     color, dash, 1.5, 2)
 
             for i in range(1, len(p_highs)):
                 p1, p2 = p_highs[i - 1], p_highs[i]
@@ -902,8 +911,8 @@ def build_alert_figure(
                 elif pdif < 0 and cdif > 0: color, dash = "orange", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                draw_line(t0, merged["p_high"].iloc[p1],   t1, merged["p_high"].iloc[p2],   color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_high"].iloc[p1], t1, merged["cvd_high"].iloc[p2], color, dash, 1.5, 2)
+                draw_line(t0, merged["p_high"].iloc[p1],                   t1, merged["p_high"].iloc[p2],                   color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_high"].iloc[p1] + cvd_offset,    t1, merged["cvd_high"].iloc[p2] + cvd_offset,    color, dash, 1.5, 2)
 
             # Live signal — already detected on UTC data before timezone conversion
             for data in (low_data, high_data):
@@ -913,13 +922,14 @@ def build_alert_figure(
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
                 is_low = "SELLER" in data["signal"]
                 p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
+                sign   = -1 if is_low else +1
                 pivots = p_lows if is_low else p_highs
                 if pivots:
                     last_p = pivots[-1]
                     t0 = merged["timestamp"].iloc[last_p]
                     t1 = merged["timestamp"].iloc[curr]
                     draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
-                    draw_line(t0, merged[c_col].iloc[last_p], t1, merged[c_col].iloc[curr], color, dash, 3, 2)
+                    draw_line(t0, merged[c_col].iloc[last_p] + sign * cvd_offset, t1, merged[c_col].iloc[curr] + sign * cvd_offset, color, dash, 3, 2)
 
                 p_pct = data.get("price_move_pct")
                 c_pct = data.get("cvd_move_pct")
