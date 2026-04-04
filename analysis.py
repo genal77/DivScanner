@@ -260,29 +260,84 @@ def compute_divergence_score(
     price_to:   float,
     cvd_from:   float,
     cvd_to:     float,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[Optional[float], Optional[float]]:
     """
-    Compute divergence strength metrics.
+    Compute display-only percentage moves for price and CVD between two pivots.
 
-    Returns (price_move_pct, cvd_move_pct, div_score):
+    Returns (price_move_pct, cvd_move_pct):
       - price_move_pct: % change in price between the two pivots
       - cvd_move_pct:   % change in CVD between the two pivots (None if cvd_from ≈ 0)
-      - div_score:      abs gap between the two percentages (None if cvd_move_pct is None)
 
-    div_score accumulates over time to build an empirical scale of signal strength.
+    Used for alert message display only — not for signal filtering.
     """
     price_move_pct = (price_to - price_from) / price_from * 100 if price_from else None
 
     if abs(cvd_from) < 1e-6:
-        return price_move_pct, None, None
+        return price_move_pct, None
 
     cvd_move_pct = (cvd_to - cvd_from) / abs(cvd_from) * 100
-    div_score = (
-        abs(price_move_pct - cvd_move_pct)
-        if price_move_pct is not None
-        else None
-    )
-    return price_move_pct, cvd_move_pct, div_score
+    return price_move_pct, cvd_move_pct
+
+
+def compute_quality_score(
+    merged:     pd.DataFrame,
+    from_idx:   int,
+    to_idx:     int,
+    price_col:  str,
+    std_window: int = 200,
+) -> Tuple[float, float, float, int]:
+    """
+    Compute raw signal quality dimensions for backtesting and analysis.
+
+    1. Persistence: fraction of bars in the pivot window [from_idx..to_idx]
+       where price (close) and CVD (close) moved in opposite directions.
+       This is the primary filter criterion (threshold: > 0.5).
+
+    2. price_atr_ratio: pivot-to-pivot price move divided by ATR(14).
+       Raw value — e.g. 2.1 means the move was 2.1× a typical candle range.
+
+    3. cvd_sigma: pivot-to-pivot CVD move divided by the expected random walk
+       range (rolling_std × sqrt(window_bars)). Raw value — e.g. 3.4 means
+       the CVD move was 3.4× what random noise would produce over this window.
+
+    Returns (persistence, price_atr_ratio, cvd_sigma, window_bars).
+    All values are raw — no normalization or composite weighting applied.
+    Weights and thresholds are determined after empirical backtesting.
+    """
+    import math
+
+    window_len = to_idx - from_idx  # number of bars in pivot window
+
+    # --- Persistence ---
+    if window_len < 2:
+        persistence = 0.0
+    else:
+        w           = merged.iloc[from_idx: to_idx + 1]
+        price_delta = w["p_close"].diff().iloc[1:]
+        cvd_delta   = w["cvd_close"].diff().iloc[1:]
+
+        valid   = (price_delta != 0) & (cvd_delta != 0)
+        n_valid = int(valid.sum())
+        if n_valid == 0:
+            persistence = 0.0
+        else:
+            diverge     = ((price_delta > 0) != (cvd_delta > 0)) & valid
+            persistence = float(diverge.sum()) / n_valid
+
+    # --- Price move / ATR(14) ---
+    atr_slice      = merged.iloc[max(0, to_idx - 13): to_idx + 1]
+    atr            = float((atr_slice["p_high"] - atr_slice["p_low"]).mean())
+    price_move     = abs(float(merged[price_col].iloc[to_idx]) - float(merged[price_col].iloc[from_idx]))
+    price_atr_ratio = price_move / atr if atr > 1e-9 else 0.0
+
+    # --- CVD move / expected random walk range ---
+    cvd_hist  = merged["cvd_close"].iloc[max(0, to_idx - std_window): to_idx + 1]
+    cvd_std   = float(cvd_hist.diff().dropna().std())
+    cvd_move  = abs(float(merged["cvd_close"].iloc[to_idx]) - float(merged["cvd_close"].iloc[from_idx]))
+    expected_cvd = cvd_std * math.sqrt(max(window_len, 1))
+    cvd_sigma = cvd_move / expected_cvd if expected_cvd > 1e-9 else 0.0
+
+    return persistence, price_atr_ratio, cvd_sigma, window_len
 
 
 def detect_spot_signals(
@@ -304,8 +359,8 @@ def detect_spot_signals(
         return None, None
 
     merged = pd.merge(
-        price_df[["timestamp", "high", "low"]].rename(
-            columns={"high": "p_high", "low": "p_low"}
+        price_df[["timestamp", "open", "high", "low", "close"]].rename(
+            columns={"high": "p_high", "low": "p_low", "close": "p_close", "open": "p_open"}
         ),
         cvd_spot_df[["timestamp", "cvd_high", "cvd_low", "cvd_close"]],
         on="timestamp", how="inner",
@@ -340,18 +395,25 @@ def detect_spot_signals(
                 pt = float(merged["p_low"].iloc[curr])
                 cf = float(merged[cvd_lo_col].iloc[last_l])
                 ct = float(merged[cvd_lo_col].iloc[curr])
-                p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
+                p_pct, c_pct = compute_divergence_score(pf, pt, cf, ct)
+                persistence, price_atr_ratio, cvd_sigma, window_bars = compute_quality_score(
+                    merged, last_l, curr, "p_low"
+                )
                 low_data = {
-                    "signal":         signal,
-                    "price_from":     pf,
-                    "price_to":       pt,
-                    "cvd_from":       cf,
-                    "cvd_to":         ct,
-                    "timestamp":      merged["timestamp"].iloc[curr],
-                    "pivot_from_ts":  merged["timestamp"].iloc[last_l],
-                    "price_move_pct": p_pct,
-                    "cvd_move_pct":   c_pct,
-                    "div_score":      score,
+                    "signal":          signal,
+                    "price_from":      pf,
+                    "price_to":        pt,
+                    "cvd_from":        cf,
+                    "cvd_to":          ct,
+                    "timestamp":       merged["timestamp"].iloc[curr],
+                    "pivot_from_ts":   merged["timestamp"].iloc[last_l],
+                    "price_move_pct":  p_pct,
+                    "cvd_move_pct":    c_pct,
+                    "persistence":     persistence,
+                    "price_atr_ratio": price_atr_ratio,
+                    "cvd_sigma":       cvd_sigma,
+                    "window_bars":     window_bars,
+                    "div_score":       persistence,  # filter criterion
                 }
 
     # Check high: current candle is the highest since last confirmed pivot high
@@ -369,18 +431,25 @@ def detect_spot_signals(
                 pt = float(merged["p_high"].iloc[curr])
                 cf = float(merged[cvd_hi_col].iloc[last_h])
                 ct = float(merged[cvd_hi_col].iloc[curr])
-                p_pct, c_pct, score = compute_divergence_score(pf, pt, cf, ct)
+                p_pct, c_pct = compute_divergence_score(pf, pt, cf, ct)
+                persistence, price_atr_ratio, cvd_sigma, window_bars = compute_quality_score(
+                    merged, last_h, curr, "p_high"
+                )
                 high_data = {
-                    "signal":         signal,
-                    "price_from":     pf,
-                    "price_to":       pt,
-                    "cvd_from":       cf,
-                    "cvd_to":         ct,
-                    "timestamp":      merged["timestamp"].iloc[curr],
-                    "pivot_from_ts":  merged["timestamp"].iloc[last_h],
-                    "price_move_pct": p_pct,
-                    "cvd_move_pct":   c_pct,
-                    "div_score":      score,
+                    "signal":          signal,
+                    "price_from":      pf,
+                    "price_to":        pt,
+                    "cvd_from":        cf,
+                    "cvd_to":          ct,
+                    "timestamp":       merged["timestamp"].iloc[curr],
+                    "pivot_from_ts":   merged["timestamp"].iloc[last_h],
+                    "price_move_pct":  p_pct,
+                    "cvd_move_pct":    c_pct,
+                    "persistence":     persistence,
+                    "price_atr_ratio": price_atr_ratio,
+                    "cvd_sigma":       cvd_sigma,
+                    "window_bars":     window_bars,
+                    "div_score":       persistence,  # filter criterion
                 }
 
     return low_data, high_data

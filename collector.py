@@ -710,7 +710,7 @@ def run_backfill() -> None:
 
 # TFs to check for divergences on every collection cycle
 ALERT_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
-MIN_DIV_SCORE    = 5.0   # minimum div_score (%) to trigger an alert — tune after observing signal_log.csv
+MIN_DIV_SCORE    = 0.50  # minimum persistence [0–1] to trigger an alert — only empirically justified filter
 
 # State file — persists last-alerted candle timestamps across restarts
 ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
@@ -769,16 +769,39 @@ def _format_alert_message(
     p_arrow = "↑" if p_to >= p_from else "↓"
     c_arrow = "↑" if c_to >= c_from else "↓"
     p_pct   = (p_to - p_from) / p_from * 100 if p_from else 0.0
-    c_pct   = signal_data.get("cvd_move_pct")
-    score   = signal_data.get("div_score")
     from zoneinfo import ZoneInfo
-    ts_str  = pd.Timestamp(ts).tz_convert(ZoneInfo("Europe/Warsaw")).strftime("%H:%M (Warsaw)")
+    ts_str  = pd.Timestamp(ts).tz_convert(ZoneInfo("Europe/Warsaw")).strftime("%H:%M (UTC+2)")
     tf_str  = "".join(f"[{tf}]" for tf in timeframes)
 
-    net_delta     = c_to - c_from
-    net_delta_str = f"Net Delta: {net_delta:+,.0f} BTC\n"
-    cvd_pct_str   = f"  [{c_pct:+.2f}%]" if c_pct is not None else ""
-    score_line    = f"Divergence Score: {score:.1f}%\n\n" if score is not None else "\n"
+    net_delta   = c_to - c_from
+    p_delta_usd = p_to - p_from
+    persistence      = signal_data.get("persistence")
+    price_atr_ratio  = signal_data.get("price_atr_ratio")
+    cvd_sigma        = signal_data.get("cvd_sigma")
+    window_bars      = signal_data.get("window_bars")
+    futures_cvd_delta = signal_data.get("futures_cvd_delta")
+
+    dims = []
+    if persistence  is not None: dims.append(f"Persistence: {persistence*100:.0f}%")
+    if window_bars  is not None: dims.append(f"Window: {window_bars}bars")
+    dims_line = "  ·  ".join(dims)
+
+    mag_parts = []
+    if price_atr_ratio is not None: mag_parts.append(f"P.Move: {price_atr_ratio:.1f}×ATR")
+    if cvd_sigma       is not None: mag_parts.append(f"CVD: {cvd_sigma:.1f}σ")
+    mag_line = "  ·  ".join(mag_parts)
+
+    fut_line = ""
+    if futures_cvd_delta is not None:
+        fut_arrow = "↑" if futures_cvd_delta >= 0 else "↓"
+        fut_line  = f"Fut.CVD: {fut_arrow} {futures_cvd_delta:+,.0f} BTC\n"
+
+    score_line = (
+        f"{dims_line}\n"
+        f"{mag_line}\n"
+        f"{fut_line}\n"
+        if dims_line else "\n"
+    )
 
     # OI context: compare OI at pivot A vs pivot B timestamps
     oi_str = ""
@@ -793,16 +816,16 @@ def _format_alert_message(
                 oi_pct   = oi_delta / oi_a * 100
                 oi_arrow = "↑" if oi_delta >= 0 else "↓"
                 oi_label = "new positions" if oi_delta >= 0 else "covering"
-                oi_str   = f"OI:    {oi_arrow} {oi_delta:+,.0f} BTC ({oi_pct:+.2f}%) · {oi_label}\n"
+                oi_str   = f"OI:    {oi_arrow} {oi_delta:+,.0f} BTC ({oi_pct:+.2f}%)· {oi_label}\n"
         except Exception:
             pass
 
     return (
-        f"{emoji} <b>{sig}</b> {tf_str}\n\n"
-        f"Price: {p_arrow} {p_from:,.0f} → {p_to:,.0f}  [{p_pct:+.2f}%]\n"
-        f"CVD:   {c_arrow} {c_from:,.0f} → {c_to:,.0f}{cvd_pct_str}\n"
-        f"{net_delta_str}"
+        f"{emoji} <b>{sig}</b> {tf_str}\n"
+        f"Price: {p_arrow} {p_delta_usd:+,.2f} USD  [{p_pct:+.2f}%]\n"
+        f"CVD S: {c_arrow} {net_delta:+,.0f} BTC\n"
         f"{oi_str}"
+        f"\n"
         f"{score_line}"
         f"BTC/USDT @ {current_price:,.2f}\n"
         f"{ts_str}"
@@ -866,10 +889,15 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
         "price_to":       signal_data.get("price_to"),
         "cvd_from":       signal_data.get("cvd_from"),
         "cvd_to":         signal_data.get("cvd_to"),
-        "price_move_pct": signal_data.get("price_move_pct"),
-        "cvd_move_pct":   signal_data.get("cvd_move_pct"),
-        "div_score":      signal_data.get("div_score"),
-        "btc_price":      current_price,
+        "price_move_pct":    signal_data.get("price_move_pct"),
+        "cvd_move_pct":      signal_data.get("cvd_move_pct"),
+        "persistence":       signal_data.get("persistence"),
+        "price_atr_ratio":   signal_data.get("price_atr_ratio"),
+        "cvd_sigma":         signal_data.get("cvd_sigma"),
+        "window_bars":       signal_data.get("window_bars"),
+        "oi_delta_pct":      signal_data.get("oi_delta_pct"),
+        "futures_cvd_delta": signal_data.get("futures_cvd_delta"),
+        "btc_price":         current_price,
     }
     df_row = pd.DataFrame([row])
     write_header = not SIGNAL_LOG_FILE.exists()
@@ -896,6 +924,53 @@ def _alert_worker(
 
 # TF priority for sorting (highest first)
 _TF_PRIORITY = {"1h": 4, "30m": 3, "15m": 2, "5m": 1}
+
+
+def _enrich_signal_with_market_context(
+    signal_data:    dict,
+    oi_df:          pd.DataFrame,
+    cvd_futures_df: pd.DataFrame,
+) -> None:
+    """
+    Enrich signal_data with raw market context dimensions for backtesting.
+
+    Adds:
+      oi_delta_pct    — % change in OI between pivot timestamps (raw)
+      futures_cvd_delta — BTC change in futures CVD between pivot timestamps (raw)
+
+    Does NOT compute a composite score — all values are logged as-is so that
+    weights and thresholds can be determined empirically after data collection.
+    Modifies signal_data in-place.
+    """
+    pivot_from_ts = signal_data.get("pivot_from_ts")
+    ts            = signal_data.get("timestamp")
+
+    # --- OI delta % ---
+    oi_delta_pct = None
+    if not oi_df.empty and pivot_from_ts is not None and ts is not None:
+        try:
+            oi_sorted = oi_df.set_index("timestamp").sort_index()
+            oi_a = float(oi_sorted["close"].asof(pd.Timestamp(pivot_from_ts)))
+            oi_b = float(oi_sorted["close"].asof(pd.Timestamp(ts)))
+            if pd.notna(oi_a) and pd.notna(oi_b) and oi_a > 0:
+                oi_delta_pct = (oi_b - oi_a) / oi_a * 100
+        except Exception:
+            pass
+
+    # --- Futures CVD delta ---
+    futures_cvd_delta = None
+    if not cvd_futures_df.empty and pivot_from_ts is not None and ts is not None:
+        try:
+            fut_sorted = cvd_futures_df.set_index("timestamp").sort_index()
+            fut_a = float(fut_sorted["cvd_close"].asof(pd.Timestamp(pivot_from_ts)))
+            fut_b = float(fut_sorted["cvd_close"].asof(pd.Timestamp(ts)))
+            if pd.notna(fut_a) and pd.notna(fut_b):
+                futures_cvd_delta = fut_b - fut_a
+        except Exception:
+            pass
+
+    signal_data["oi_delta_pct"]      = oi_delta_pct
+    signal_data["futures_cvd_delta"] = futures_cvd_delta
 
 
 def check_and_alert(state: dict) -> None:
@@ -949,6 +1024,7 @@ def check_and_alert(state: dict) -> None:
             ts_str = pd.Timestamp(signal_data["timestamp"]).isoformat()
             if ts_str == state[tf].get(key):
                 continue  # already alerted for this candle
+            _enrich_signal_with_market_context(signal_data, oi_df, cvd_futures_df)
             score = signal_data.get("div_score")
             if score is None or score < MIN_DIV_SCORE:
                 log.info(f"[alert] filtered {tf} {signal_data['signal']} — div_score {score} < {MIN_DIV_SCORE}")

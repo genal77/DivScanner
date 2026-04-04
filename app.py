@@ -138,6 +138,21 @@ app.layout = html.Div(
             data={"cvd_spot": "candle", "cvd_futures": "candle", "oi": "candle"},
         ),
 
+        # ── Tabs ──────────────────────────────────────────────────────────
+        dcc.Tabs(
+            id="main-tabs",
+            value="chart",
+            style={"flexShrink": "0"},
+            colors={"border": _BORDER, "primary": "#26a69a", "background": _PANEL},
+            children=[
+
+            dcc.Tab(
+                label="Chart",
+                value="chart",
+                style={"backgroundColor": _PANEL, "color": _MUTED, "border": "none", "padding": "6px 18px"},
+                selected_style={"backgroundColor": _DARK, "color": "white", "border": "none", "borderBottom": f"2px solid #26a69a", "padding": "6px 18px"},
+                children=[
+
         # ── Top controls bar ──────────────────────────────────────────────
         html.Div(
             style={
@@ -337,8 +352,64 @@ app.layout = html.Div(
             ],
         ),
 
+                ]),  # end Tab: Chart
+
+            dcc.Tab(
+                label="Signal Log",
+                value="signal-log",
+                style={"backgroundColor": _PANEL, "color": _MUTED, "border": "none", "padding": "6px 18px"},
+                selected_style={"backgroundColor": _DARK, "color": "white", "border": "none", "borderBottom": "2px solid #26a69a", "padding": "6px 18px"},
+                children=[
+                    html.Div(
+                        style={"padding": "16px", "height": "calc(100vh - 80px)", "overflowY": "auto", "backgroundColor": _DARK},
+                        children=[
+                            html.Div(
+                                id="signal-log-meta",
+                                style={"color": _MUTED, "fontSize": "11px", "marginBottom": "10px"},
+                            ),
+                            dash.dash_table.DataTable(
+                                id="signal-log-table",
+                                columns=[],
+                                data=[],
+                                sort_action="native",
+                                page_size=50,
+                                style_table={"overflowX": "auto"},
+                                style_header={
+                                    "backgroundColor": _PANEL,
+                                    "color": _MUTED,
+                                    "fontSize": "11px",
+                                    "fontWeight": "normal",
+                                    "textTransform": "uppercase",
+                                    "letterSpacing": "0.5px",
+                                    "borderBottom": f"1px solid {_BORDER}",
+                                    "border": "none",
+                                    "whiteSpace": "nowrap",
+                                },
+                                style_cell={
+                                    "backgroundColor": _DARK,
+                                    "color": _TEXT,
+                                    "fontSize": "12px",
+                                    "border": "none",
+                                    "borderBottom": f"1px solid {_BORDER}",
+                                    "padding": "6px 10px",
+                                    "whiteSpace": "nowrap",
+                                    "fontFamily": "monospace",
+                                },
+                                style_data_conditional=[
+                                    {"if": {"filter_query": '{signal} contains "BUYING"'},  "color": "#ef5350"},
+                                    {"if": {"filter_query": '{signal} contains "SELLING"'}, "color": "#26a69a"},
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),  # end Tab: Signal Log
+
+            ]),  # end dcc.Tabs
+
         # ── Auto-refresh ticker ───────────────────────────────────────────
         dcc.Interval(id="refresh-interval", interval=REFRESH_MS, n_intervals=0),
+        dcc.Interval(id="log-refresh-interval", interval=30_000, n_intervals=0),
     ],
 )
 
@@ -469,6 +540,89 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
     now_str = "Updated " + datetime.now(_WARSAW).strftime("%H:%M:%S (Warsaw)")
 
     return fig, now_str
+
+
+# ---------------------------------------------------------------------------
+# SIGNAL LOG
+# ---------------------------------------------------------------------------
+
+_LOG_COLUMNS = [
+    {"name": "Time (UTC+2)",   "id": "time_local"},
+    {"name": "Signal",         "id": "signal"},
+    {"name": "TF",             "id": "timeframes"},
+    {"name": "Price →",        "id": "price_move"},
+    {"name": "CVD →",          "id": "cvd_move"},
+    {"name": "Persist.",       "id": "persistence_fmt"},
+    {"name": "P.Move ATR",     "id": "price_atr_fmt"},
+    {"name": "CVD σ",          "id": "cvd_sigma_fmt"},
+    {"name": "Window",         "id": "window_bars"},
+    {"name": "OI Δ%",          "id": "oi_delta_fmt"},
+    {"name": "Fut.CVD Δ",      "id": "futures_cvd_fmt"},
+    {"name": "BTC price",      "id": "btc_price"},
+]
+
+
+@app.callback(
+    Output("signal-log-table", "columns"),
+    Output("signal-log-table", "data"),
+    Output("signal-log-meta",  "children"),
+    Input("log-refresh-interval", "n_intervals"),
+    Input("main-tabs", "value"),
+)
+def update_signal_log(_, active_tab):
+    """Load signal_log.csv and format for DataTable. Triggered on tab switch and every 30s."""
+    if active_tab != "signal-log":
+        return dash.no_update, dash.no_update, dash.no_update
+
+    log_path = DATA_DIR / "signal_log.csv"
+    if not log_path.exists():
+        return _LOG_COLUMNS, [], "Brak danych — signal_log.csv nie istnieje."
+
+    df = pd.read_csv(log_path)
+    if df.empty:
+        return _LOG_COLUMNS, [], "Plik istnieje, ale nie zawiera jeszcze żadnych sygnałów."
+
+    df = df.sort_values("sent_at", ascending=False)
+
+    _WA = ZoneInfo("Europe/Warsaw")
+
+    def _fmt_ts(ts_str):
+        try:
+            return pd.Timestamp(ts_str).tz_convert(_WA).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ts_str
+
+    def _fmt_price_move(row):
+        try:
+            return f"{row['price_from']:,.0f} → {row['price_to']:,.0f}"
+        except Exception:
+            return ""
+
+    def _fmt_cvd_move(row):
+        try:
+            return f"{row['cvd_from']:+,.0f} → {row['cvd_to']:+,.0f}"
+        except Exception:
+            return ""
+
+    rows = []
+    for _, r in df.iterrows():
+        rows.append({
+            "time_local":    _fmt_ts(r.get("sent_at", "")),
+            "signal":        r.get("signal", ""),
+            "timeframes":    r.get("timeframes", ""),
+            "price_move":    _fmt_price_move(r),
+            "cvd_move":      _fmt_cvd_move(r),
+            "persistence_fmt": f"{r['persistence']*100:.0f}%" if pd.notna(r.get("persistence")) else "—",
+            "price_atr_fmt": f"{r['price_atr_ratio']:.2f}×" if pd.notna(r.get("price_atr_ratio")) else "—",
+            "cvd_sigma_fmt": f"{r['cvd_sigma']:.2f}σ"       if pd.notna(r.get("cvd_sigma"))       else "—",
+            "window_bars":   int(r["window_bars"]) if pd.notna(r.get("window_bars")) else "—",
+            "oi_delta_fmt":  f"{r['oi_delta_pct']:+.3f}%"   if pd.notna(r.get("oi_delta_pct"))    else "—",
+            "futures_cvd_fmt": f"{r['futures_cvd_delta']:+,.0f}" if pd.notna(r.get("futures_cvd_delta")) else "—",
+            "btc_price":     f"{r['btc_price']:,.2f}"        if pd.notna(r.get("btc_price"))        else "—",
+        })
+
+    meta = f"{len(df)} sygnałów · ostatni: {_fmt_ts(df['sent_at'].iloc[0])}"
+    return _LOG_COLUMNS, rows, meta
 
 
 # ---------------------------------------------------------------------------
