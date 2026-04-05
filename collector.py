@@ -895,7 +895,7 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
         "price_atr_ratio":   signal_data.get("price_atr_ratio"),
         "cvd_sigma":         signal_data.get("cvd_sigma"),
         "window_bars":       signal_data.get("window_bars"),
-        "oi_delta_pct":      signal_data.get("oi_delta_pct"),
+        "oi_delta_btc":      signal_data.get("oi_delta_btc"),
         "futures_cvd_delta": signal_data.get("futures_cvd_delta"),
         "btc_price":         current_price,
         "cvd_mode":          "line",
@@ -906,21 +906,26 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
 
 
 def _alert_worker(
-    signal_data: dict,
-    timeframes: list,
+    entries: list,
     price_df: pd.DataFrame,
     cvd_spot_df: pd.DataFrame,
     cvd_futures_df: pd.DataFrame,
     oi_df: pd.DataFrame,
     top_tf: str,
 ) -> None:
-    """Background thread: render image, format message, send to Telegram."""
+    """Background thread: log each TF separately, render image, send Telegram."""
     current_price = float(price_df["close"].iloc[-1]) if not price_df.empty else 0.0
-    _append_signal_log(signal_data, timeframes, current_price)
-    image_bytes   = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf)
-    text          = _format_alert_message(signal_data, timeframes, current_price, oi_df)
+
+    # Log each timeframe as an individual row so per-TF metrics are preserved
+    for tf, signal_data, *_ in entries:
+        _append_signal_log(signal_data, [tf], current_price)
+
+    top_signal_data = entries[0][1]
+    timeframes      = [e[0] for e in entries]
+    image_bytes     = _build_alert_image(price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf)
+    text            = _format_alert_message(top_signal_data, timeframes, current_price, oi_df)
     _send_telegram(text, image_bytes)
-    log.info(f"[alert] {' · '.join(timeframes)} · {signal_data['signal']} → Telegram sent")
+    log.info(f"[alert] {' · '.join(timeframes)} · {top_signal_data['signal']} → Telegram sent")
 
 
 # TF priority for sorting (highest first)
@@ -946,15 +951,15 @@ def _enrich_signal_with_market_context(
     pivot_from_ts = signal_data.get("pivot_from_ts")
     ts            = signal_data.get("timestamp")
 
-    # --- OI delta % ---
-    oi_delta_pct = None
+    # --- OI delta (absolute BTC) ---
+    oi_delta_btc = None
     if not oi_df.empty and pivot_from_ts is not None and ts is not None:
         try:
             oi_sorted = oi_df.set_index("timestamp").sort_index()
             oi_a = float(oi_sorted["close"].asof(pd.Timestamp(pivot_from_ts)))
             oi_b = float(oi_sorted["close"].asof(pd.Timestamp(ts)))
-            if pd.notna(oi_a) and pd.notna(oi_b) and oi_a > 0:
-                oi_delta_pct = (oi_b - oi_a) / oi_a * 100
+            if pd.notna(oi_a) and pd.notna(oi_b):
+                oi_delta_btc = oi_b - oi_a
         except Exception:
             pass
 
@@ -970,7 +975,7 @@ def _enrich_signal_with_market_context(
         except Exception:
             pass
 
-    signal_data["oi_delta_pct"]      = oi_delta_pct
+    signal_data["oi_delta_btc"]      = oi_delta_btc
     signal_data["futures_cvd_delta"] = futures_cvd_delta
 
 
@@ -1040,10 +1045,10 @@ def check_and_alert(state: dict) -> None:
     for sig_name, entries in pending.items():
         entries.sort(key=lambda x: _TF_PRIORITY.get(x[0], 0), reverse=True)
         timeframes = [e[0] for e in entries]
-        top_tf, top_signal_data, price_df, cvd_spot_df, cvd_futures_df, oi_df = entries[0]
+        top_tf, _, price_df, cvd_spot_df, cvd_futures_df, oi_df = entries[0]
         threading.Thread(
             target=_alert_worker,
-            args=(top_signal_data, timeframes, price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf),
+            args=(entries, price_df, cvd_spot_df, cvd_futures_df, oi_df, top_tf),
             daemon=True,
         ).start()
 
