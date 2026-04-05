@@ -9,6 +9,7 @@ services:
       - ./data:/app/data
       - ./collector.py:/app/collector.py
       - ./analysis.py:/app/analysis.py
+      - ./outcome_tracker.py:/app/outcome_tracker.py
 
   app:
     build: .

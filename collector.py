@@ -1071,6 +1071,12 @@ def start() -> None:
         except Exception as e:
             log.error(f"Alert check failed: {e}")
 
+        try:
+            from outcome_tracker import check_outcomes
+            check_outcomes()
+        except Exception as e:
+            log.error(f"Outcome tracking failed: {e}")
+
         time.sleep(UPDATE_INTERVAL_S)
 
 
