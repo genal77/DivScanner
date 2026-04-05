@@ -92,7 +92,10 @@ def _backfill_row(row: pd.Series, tf: str,
     if pd.Timestamp(candidate["timestamp"]) != signal_ts:
         return None
 
+    pivot_from_ts = candidate.get("pivot_from_ts")
+
     updates = {
+        "pivot_from_ts":   pd.Timestamp(pivot_from_ts).isoformat() if pivot_from_ts is not None else None,
         "price_from":      candidate.get("price_from"),
         "price_to":        candidate.get("price_to"),
         "cvd_from":        candidate.get("cvd_from"),
@@ -104,8 +107,6 @@ def _backfill_row(row: pd.Series, tf: str,
         "cvd_sigma":       candidate.get("cvd_sigma"),
         "window_bars":     candidate.get("window_bars"),
     }
-
-    pivot_from_ts = candidate.get("pivot_from_ts")
 
     # OI delta (absolute BTC)
     if pivot_from_ts is not None and not oi_1m.empty:
@@ -151,7 +152,11 @@ def main() -> None:
     df["signal"] = df["signal"].replace(NAME_MAP)
     log.info("Signal names normalized")
 
-    # 2. Rename oi_delta_pct → oi_delta_btc if old column present
+    # 2. Add pivot_from_ts column if missing
+    if "pivot_from_ts" not in df.columns:
+        df["pivot_from_ts"] = None
+
+    # 3. Rename oi_delta_pct → oi_delta_btc if old column present
     if "oi_delta_pct" in df.columns and "oi_delta_btc" not in df.columns:
         df.rename(columns={"oi_delta_pct": "oi_delta_btc"}, inplace=True)
         df["oi_delta_btc"] = None  # will be recomputed from parquet
@@ -176,6 +181,7 @@ def main() -> None:
                 new_row = row.to_dict()
                 new_row["timeframes"] = tf
                 # Mark quality metrics as needing recompute (may be from wrong TF)
+                new_row["pivot_from_ts"]   = None
                 new_row["persistence"]     = None
                 new_row["price_atr_ratio"] = None
                 new_row["cvd_sigma"]       = None

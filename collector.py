@@ -882,6 +882,7 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
     """Append one row to the signal log CSV. Creates file with header if it doesn't exist."""
     row = {
         "timestamp":      pd.Timestamp(signal_data["timestamp"]).isoformat(),
+        "pivot_from_ts":  pd.Timestamp(signal_data["pivot_from_ts"]).isoformat() if signal_data.get("pivot_from_ts") is not None else None,
         "sent_at":        pd.Timestamp.utcnow().isoformat(),
         "timeframes":     ",".join(timeframes),
         "signal":         signal_data["signal"],
