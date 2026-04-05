@@ -344,7 +344,7 @@ def detect_spot_signals(
     price_df:     pd.DataFrame,
     cvd_spot_df:  pd.DataFrame,
     pivot_window: int = PIVOT_WINDOW,
-    cvd_mode:     str = "candle",
+    cvd_mode:     str = "line",
 ) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Detect active divergence signals between price and CVD spot.
@@ -927,27 +927,27 @@ def build_alert_figure(
 
             for i in range(1, len(p_lows)):
                 p1, p2 = p_lows[i - 1], p_lows[i]
-                pdif = merged["p_low"].iloc[p2]   - merged["p_low"].iloc[p1]
-                cdif = merged["cvd_low"].iloc[p2] - merged["cvd_low"].iloc[p1]
+                pdif = merged["p_low"].iloc[p2]     - merged["p_low"].iloc[p1]
+                cdif = merged["cvd_close"].iloc[p2] - merged["cvd_close"].iloc[p1]
                 if   pdif < 0 and cdif > 0: color, dash = "#2196f3", "dash"
                 elif pdif > 0 and cdif < 0: color, dash = "#2196f3", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                s = _shift_a(p1, p2, "cvd_low", -1)
-                draw_line(t0, merged["p_low"].iloc[p1],              t1, merged["p_low"].iloc[p2],              color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_low"].iloc[p1] - s,        t1, merged["cvd_low"].iloc[p2] - s,        color, dash, 1.5, 2)
+                s = _shift_a(p1, p2, "cvd_close", -1)
+                draw_line(t0, merged["p_low"].iloc[p1],                t1, merged["p_low"].iloc[p2],                color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_close"].iloc[p1] - s,        t1, merged["cvd_close"].iloc[p2] - s,        color, dash, 1.5, 2)
 
             for i in range(1, len(p_highs)):
                 p1, p2 = p_highs[i - 1], p_highs[i]
-                pdif = merged["p_high"].iloc[p2]   - merged["p_high"].iloc[p1]
-                cdif = merged["cvd_high"].iloc[p2] - merged["cvd_high"].iloc[p1]
+                pdif = merged["p_high"].iloc[p2]    - merged["p_high"].iloc[p1]
+                cdif = merged["cvd_close"].iloc[p2] - merged["cvd_close"].iloc[p1]
                 if   pdif > 0 and cdif < 0: color, dash = "orange", "dash"
                 elif pdif < 0 and cdif > 0: color, dash = "orange", "solid"
                 else: continue
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
-                s = _shift_a(p1, p2, "cvd_high", +1)
-                draw_line(t0, merged["p_high"].iloc[p1],             t1, merged["p_high"].iloc[p2],             color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_high"].iloc[p1] + s,       t1, merged["cvd_high"].iloc[p2] + s,       color, dash, 1.5, 2)
+                s = _shift_a(p1, p2, "cvd_close", +1)
+                draw_line(t0, merged["p_high"].iloc[p1],               t1, merged["p_high"].iloc[p2],               color, dash, 1.5, 1)
+                draw_line(t0, merged["cvd_close"].iloc[p1] + s,        t1, merged["cvd_close"].iloc[p2] + s,        color, dash, 1.5, 2)
 
             # Live signal — already detected on UTC data before timezone conversion
             for data in (low_data, high_data):
@@ -956,7 +956,7 @@ def build_alert_figure(
                 color = "#2196f3" if "SELL" in data["signal"] else "orange"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
                 is_low = "SELL" in data["signal"]
-                p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
+                p_col, c_col = ("p_low", "cvd_close") if is_low else ("p_high", "cvd_close")
                 sign   = -1 if is_low else +1
                 pivots = p_lows if is_low else p_highs
                 if pivots:
