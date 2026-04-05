@@ -538,8 +538,8 @@ _LOG_COLUMNS = [
     {"name": "Time (UTC+2)",   "id": "time_local"},
     {"name": "Signal",         "id": "signal"},
     {"name": "TF",             "id": "timeframes"},
-    {"name": "Price →",        "id": "price_move"},
-    {"name": "CVD →",          "id": "cvd_move"},
+    {"name": "Price Δ (USD)",   "id": "price_move"},
+    {"name": "CVD Δ (BTC)",    "id": "cvd_move"},
     {"name": "Persist.",       "id": "persistence_fmt"},
     {"name": "P.Move ATR",     "id": "price_atr_fmt"},
     {"name": "CVD σ",          "id": "cvd_sigma_fmt"},
@@ -613,13 +613,15 @@ def update_signal_log(_, n_log):
 
     def _fmt_price_move(row):
         try:
-            return f"{row['price_from']:,.0f} → {row['price_to']:,.0f}"
+            delta = float(row["price_to"]) - float(row["price_from"])
+            return f"{delta:+,.2f}"
         except Exception:
             return ""
 
     def _fmt_cvd_move(row):
         try:
-            return f"{row['cvd_from']:+,.0f} → {row['cvd_to']:+,.0f}"
+            delta = float(row["cvd_to"]) - float(row["cvd_from"])
+            return f"{delta:+,.1f}"
         except Exception:
             return ""
 
