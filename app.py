@@ -695,21 +695,37 @@ def update_signal_log(_, n_log):
 # ---------------------------------------------------------------------------
 
 _OUTCOMES_FIXED_COLUMNS = [
-    {"name": "Time (UTC+2)",    "id": "time_local"},
-    {"name": "Signal",          "id": "signal"},
-    {"name": "TF",              "id": "timeframes"},
-    {"name": "Dir.",            "id": "direction"},
-    {"name": "Entry",           "id": "entry_fmt"},
-    {"name": "Risk ($)",        "id": "risk_fmt"},
-    {"name": "SL tight",        "id": "sl_tight_fmt"},
-    {"name": "SL normal",       "id": "sl_normal_fmt"},
-    {"name": "SL wide",         "id": "sl_wide_fmt"},
-    {"name": "TP 1R",           "id": "tp_1r_fmt"},
-    {"name": "TP 2R",           "id": "tp_2r_fmt"},
-    {"name": "TP 3R",           "id": "tp_3r_fmt"},
-    {"name": "First Hit",       "id": "first_hit"},
-    {"name": "Time to Hit",     "id": "time_to_hit_fmt"},
+    {"name": "Time (UTC+2)",   "id": "time_local"},
+    {"name": "Signal",         "id": "signal"},
+    {"name": "TF",             "id": "timeframes"},
+    {"name": "Dir.",           "id": "direction"},
+    {"name": "Entry",          "id": "entry_fmt"},
+    {"name": "Risk ($)",       "id": "risk_fmt"},
+    {"name": "SL tight",       "id": "sl_tight_fmt"},
+    {"name": "SL normal",      "id": "sl_normal_fmt"},
+    {"name": "SL wide",        "id": "sl_wide_fmt"},
+    {"name": "TP 1R",          "id": "tp_1r_fmt"},
+    {"name": "TP 2R",          "id": "tp_2r_fmt"},
+    {"name": "TP 3R",          "id": "tp_3r_fmt"},
+    {"name": "SL tight (min)", "id": "sl_tight_min_fmt"},
+    {"name": "SL norm (min)",  "id": "sl_normal_min_fmt"},
+    {"name": "SL wide (min)",  "id": "sl_wide_min_fmt"},
+    {"name": "TP 1R (min)",    "id": "tp_1r_min_fmt"},
+    {"name": "TP 2R (min)",    "id": "tp_2r_min_fmt"},
+    {"name": "TP 3R (min)",    "id": "tp_3r_min_fmt"},
 ]
+
+# Horizon columns in fixed order matching outcome_tracker.ALL_COLS
+_HORIZON_LABELS = ["15m", "30m", "1h", "2h", "4h", "8h", "12h", "24h", "48h"]
+_OUTCOMES_HORIZON_COLUMNS = []
+for _lbl in _HORIZON_LABELS:
+    _OUTCOMES_HORIZON_COLUMNS += [
+        {"name": f"Δ% {_lbl}",  "id": f"chg_pct_{_lbl}"},
+        {"name": f"MFE {_lbl}", "id": f"mfe_{_lbl}"},
+        {"name": f"MAE {_lbl}", "id": f"mae_{_lbl}"},
+    ]
+
+_OUTCOMES_ALL_COLUMNS = _OUTCOMES_FIXED_COLUMNS + _OUTCOMES_HORIZON_COLUMNS
 
 
 @app.callback(
@@ -727,11 +743,11 @@ def update_outcomes(_, n_out):
 
     outcomes_path = DATA_DIR / "signal_outcomes.csv"
     if not outcomes_path.exists():
-        return _OUTCOMES_FIXED_COLUMNS, [], "Brak danych — signal_outcomes.csv nie istnieje."
+        return _OUTCOMES_ALL_COLUMNS, [], "Brak danych — signal_outcomes.csv nie istnieje."
 
     df = pd.read_csv(outcomes_path)
     if df.empty:
-        return _OUTCOMES_FIXED_COLUMNS, [], "Plik istnieje, ale nie zawiera jeszcze żadnych wyników."
+        return _OUTCOMES_ALL_COLUMNS, [], "Plik istnieje, ale nie zawiera jeszcze żadnych wyników."
 
     df = df.sort_values("sent_at", ascending=False)
 
@@ -749,7 +765,7 @@ def update_outcomes(_, n_out):
         except Exception:
             return "—"
 
-    def _fmt_time_to_hit(val):
+    def _fmt_min(val):
         try:
             mins = float(val)
             if mins < 60:
@@ -758,46 +774,59 @@ def update_outcomes(_, n_out):
         except Exception:
             return "—"
 
-    # Discover dynamic horizon columns (chg_pct_* present in CSV)
-    horizon_cols = sorted([c for c in df.columns if c.startswith("chg_pct_")])
-    dynamic_columns = [{"name": c.replace("chg_pct_", "Δ% "), "id": c} for c in horizon_cols]
-    all_columns = _OUTCOMES_FIXED_COLUMNS + dynamic_columns
+    def _fmt_pct(val):
+        try:
+            return f"{float(val):+.2f}%"
+        except Exception:
+            return "—"
+
+    def _fmt_usd(val):
+        try:
+            return f"{float(val):+,.1f}"
+        except Exception:
+            return "—"
 
     rows = []
     for _, r in df.iterrows():
         row = {
-            "time_local":    _fmt_ts(r.get("sent_at", "")),
-            "signal":        r.get("signal", ""),
-            "timeframes":    r.get("timeframes", ""),
-            "direction":     r.get("direction", ""),
-            "entry_fmt":     _fmt_price(r.get("entry")),
-            "risk_fmt":      _fmt_price(r.get("risk")),
-            "sl_tight_fmt":  _fmt_price(r.get("sl_tight")),
-            "sl_normal_fmt": _fmt_price(r.get("sl_normal")),
-            "sl_wide_fmt":   _fmt_price(r.get("sl_wide")),
-            "tp_1r_fmt":     _fmt_price(r.get("tp_1r")),
-            "tp_2r_fmt":     _fmt_price(r.get("tp_2r")),
-            "tp_3r_fmt":     _fmt_price(r.get("tp_3r")),
-            "first_hit":     r.get("first_hit", "—"),
-            "time_to_hit_fmt": _fmt_time_to_hit(r.get("time_to_hit_min")),
+            "time_local":       _fmt_ts(r.get("sent_at", "")),
+            "signal":           r.get("signal", ""),
+            "timeframes":       r.get("timeframes", ""),
+            "direction":        r.get("direction", ""),
+            "entry_fmt":        _fmt_price(r.get("entry")),
+            "risk_fmt":         _fmt_price(r.get("risk")),
+            "sl_tight_fmt":     _fmt_price(r.get("sl_tight")),
+            "sl_normal_fmt":    _fmt_price(r.get("sl_normal")),
+            "sl_wide_fmt":      _fmt_price(r.get("sl_wide")),
+            "tp_1r_fmt":        _fmt_price(r.get("tp_1r")),
+            "tp_2r_fmt":        _fmt_price(r.get("tp_2r")),
+            "tp_3r_fmt":        _fmt_price(r.get("tp_3r")),
+            "sl_tight_min_fmt": _fmt_min(r.get("sl_tight_min")),
+            "sl_normal_min_fmt":_fmt_min(r.get("sl_normal_min")),
+            "sl_wide_min_fmt":  _fmt_min(r.get("sl_wide_min")),
+            "tp_1r_min_fmt":    _fmt_min(r.get("tp_1r_min")),
+            "tp_2r_min_fmt":    _fmt_min(r.get("tp_2r_min")),
+            "tp_3r_min_fmt":    _fmt_min(r.get("tp_3r_min")),
         }
-        for col in horizon_cols:
-            try:
-                val = float(r[col])
-                row[col] = f"{val:+.2f}%"
-            except Exception:
-                row[col] = "—"
+        for lbl in _HORIZON_LABELS:
+            row[f"chg_pct_{lbl}"] = _fmt_pct(r.get(f"chg_pct_{lbl}"))
+            row[f"mfe_{lbl}"]     = _fmt_usd(r.get(f"mfe_{lbl}"))
+            row[f"mae_{lbl}"]     = _fmt_usd(r.get(f"mae_{lbl}"))
         rows.append(row)
 
-    resolved   = df[df["first_hit"].notna() & (df["first_hit"] != "none")]
-    tp_hits    = resolved[resolved["first_hit"].str.startswith("tp", na=False)]
-    sl_hits    = resolved[resolved["first_hit"].str.startswith("sl", na=False)]
+    # Summary: count signals where tp_1r was hit before sl_normal (profitable at 1R)
+    tp1_before_sln = df[
+        df["tp_1r_min"].notna() &
+        (df["sl_normal_min"].isna() | (df["tp_1r_min"] < df["sl_normal_min"]))
+    ]
+    sln_hit = df[df["sl_normal_min"].notna()]
+    pending = df[df["tp_1r_min"].isna() & df["sl_normal_min"].isna()]
     meta = (
-        f"{len(df)} wyników · TP: {len(tp_hits)} · SL: {len(sl_hits)} · "
-        f"pending: {len(df) - len(resolved)} · "
+        f"{len(df)} wyników · TP1R przed SL-norm: {len(tp1_before_sln)} · "
+        f"SL-norm zaliczony: {len(sln_hit)} · pending: {len(pending)} · "
         f"ostatni: {_fmt_ts(df['sent_at'].iloc[0])}"
     )
-    return all_columns, rows, meta
+    return _OUTCOMES_ALL_COLUMNS, rows, meta
 
 
 # ---------------------------------------------------------------------------

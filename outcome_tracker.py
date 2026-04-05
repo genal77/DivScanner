@@ -3,9 +3,12 @@ outcome_tracker.py — Post-signal price outcome tracker for backtesting.
 
 For each divergence signal in signal_log.csv, computes and saves:
   - Entry price, SL levels (tight/normal/wide via ATR), TP levels (1R/2R/3R)
-  - Price and % change at fixed time horizons (varies by signal TF)
-  - MFE / MAE using 5m OHLC high/low (not just close)
-  - First SL or TP level hit, and time to hit
+  - Time-to-hit for each SL and TP level independently (None = not reached in horizon)
+  - chg_pct / MFE / MAE at fixed time horizons (varies by signal TF)
+
+Column structure is fixed and complete — all horizon columns always present,
+NaN for horizons not applicable to a given TF. This prevents CSV misalignment
+when rows with different TFs are appended over time.
 
 Writes results to data/signal_outcomes.csv.
 Called once per collector cycle — skips signals with insufficient parquet data.
@@ -22,12 +25,11 @@ DATA_DIR        = Path("data")
 SIGNAL_LOG_FILE = DATA_DIR / "signal_log.csv"
 OUTCOMES_FILE   = DATA_DIR / "signal_outcomes.csv"
 
-# Measurement horizons in hours, keyed by highest signal TF.
-# Fine-grained enough to catch early moves, coarse enough to assess trend.
+# Measurement horizons in hours, keyed by signal TF.
 TF_HORIZONS: Dict[str, List[float]] = {
-    "5m":  [0.25, 0.5, 1.0, 2.0, 4.0],
-    "15m": [0.5,  1.0, 2.0, 4.0, 8.0, 12.0],
-    "30m": [1.0,  2.0, 4.0, 8.0, 12.0, 24.0],
+    "5m":  [0.25, 0.5,  1.0,  2.0,  4.0],
+    "15m": [0.5,  1.0,  2.0,  4.0,  8.0, 12.0],
+    "30m": [1.0,  2.0,  4.0,  8.0, 12.0, 24.0],
     "1h":  [4.0,  8.0, 12.0, 24.0, 48.0],
 }
 TF_PRIORITY = {"1h": 4, "30m": 3, "15m": 2, "5m": 1}
@@ -37,6 +39,28 @@ SL_CONFIGS = {"sl_tight": 0.0, "sl_normal": 0.75, "sl_wide": 1.5}
 # TP multiples of (entry - sl_normal) risk
 TP_CONFIGS = {"tp_1r": 1.0, "tp_2r": 2.0, "tp_3r": 3.0}
 ATR_BARS   = 14
+
+# ---------------------------------------------------------------------------
+# FIXED COLUMN SCHEMA — written once, never changes across appends
+# ---------------------------------------------------------------------------
+
+# All possible horizon labels across all TFs, in chronological order
+_ALL_HORIZON_LABELS = ["15m", "30m", "1h", "2h", "4h", "8h", "12h", "24h", "48h"]
+
+_FIXED_COLS = [
+    "sent_at", "timestamp", "signal", "timeframes", "direction",
+    "entry", "pivot", "atr", "risk",
+    "sl_tight", "sl_normal", "sl_wide",
+    "tp_1r", "tp_2r", "tp_3r",
+    "sl_tight_min", "sl_normal_min", "sl_wide_min",
+    "tp_1r_min", "tp_2r_min", "tp_3r_min",
+]
+
+_HORIZON_COLS = []
+for _lbl in _ALL_HORIZON_LABELS:
+    _HORIZON_COLS += [f"chg_pct_{_lbl}", f"mfe_{_lbl}", f"mae_{_lbl}"]
+
+ALL_COLS = _FIXED_COLS + _HORIZON_COLS
 
 
 # ---------------------------------------------------------------------------
@@ -94,24 +118,24 @@ def _compute_outcome(row: pd.Series, spot_5m: pd.DataFrame) -> Optional[Dict]:
     Returns None if parquet data does not yet cover the max horizon —
     the signal will be retried on the next collector cycle.
 
-    Uses 5m candles for MFE/MAE and first-hit detection (highest accuracy).
+    Uses 5m candles for MFE/MAE and hit-time detection (highest accuracy).
     Uses resampled TF candles for ATR (matches the signal's own timeframe).
     """
     from analysis import INTERVAL_MAP
 
-    sent_at    = pd.Timestamp(row["sent_at"])
-    signal     = str(row["signal"])
-    tfs_str    = str(row["timeframes"])
-    entry      = float(row["btc_price"])   # close of the most recent candle at alert time
-    pivot      = float(row["price_to"])    # pivot extreme: low for bullish, high for bearish
+    sent_at         = pd.Timestamp(row["sent_at"])
+    signal          = str(row["signal"])
+    tfs_str         = str(row["timeframes"])
+    entry           = float(row["btc_price"])
+    pivot           = float(row["price_to"])   # pivot extreme: low for bullish, high for bearish
 
-    # "SELLING *" → sellers losing → bullish. Handles both "SELLING" and "SELLERS" variants.
-    is_bullish     = "SELL" in signal.upper()
-    top_tf_str     = _top_tf(tfs_str)
+    # "SELLING *" → sellers losing → bullish
+    is_bullish      = "SELL" in signal.upper()
+    top_tf_str      = _top_tf(tfs_str)
     pandas_interval = INTERVAL_MAP.get(top_tf_str, "5min")
 
-    horizons  = _get_horizons(tfs_str)
-    max_h     = max(horizons)
+    horizons      = _get_horizons(tfs_str)
+    max_h         = max(horizons)
     max_ts_needed = sent_at + pd.Timedelta(hours=max_h)
 
     # --- Post-signal 5m candles (Binance only) ---
@@ -122,50 +146,60 @@ def _compute_outcome(row: pd.Series, spot_5m: pd.DataFrame) -> Optional[Dict]:
         return None  # not enough data yet — retry later
 
     # --- ATR from pre-signal candles at signal TF ---
-    pre_5m  = binance_5m[binance_5m["timestamp"] <= sent_at]
-    pre_tf  = _resample_to_tf(pre_5m, pandas_interval)
-    atr     = _compute_atr(pre_tf)
+    pre_5m = binance_5m[binance_5m["timestamp"] <= sent_at]
+    pre_tf = _resample_to_tf(pre_5m, pandas_interval)
+    atr    = _compute_atr(pre_tf)
 
     # --- SL / TP levels ---
     if is_bullish:
-        sl = {k: pivot - mult * atr for k, mult in SL_CONFIGS.items()}
+        sl   = {k: pivot - mult * atr for k, mult in SL_CONFIGS.items()}
         risk = entry - sl["sl_normal"]
-        tp = {k: entry + mult * risk for k, mult in TP_CONFIGS.items()}
+        tp   = {k: entry + mult * risk for k, mult in TP_CONFIGS.items()}
     else:
-        sl = {k: pivot + mult * atr for k, mult in SL_CONFIGS.items()}
+        sl   = {k: pivot + mult * atr for k, mult in SL_CONFIGS.items()}
         risk = sl["sl_normal"] - entry
-        tp = {k: entry - mult * risk for k, mult in TP_CONFIGS.items()}
+        tp   = {k: entry - mult * risk for k, mult in TP_CONFIGS.items()}
 
-    # Guard against degenerate risk (entry already past pivot)
     risk = max(risk, 0.0)
 
+    # --- Build base outcome dict (fixed columns only, all present) ---
     outcome: Dict = {
-        "sent_at":    row["sent_at"],
-        "timestamp":  row["timestamp"],
-        "signal":     signal,
-        "timeframes": tfs_str,
-        "direction":  "LONG" if is_bullish else "SHORT",
-        "entry":      round(entry, 2),
-        "pivot":      round(pivot, 2),
-        "atr":        round(atr, 2),
-        "risk":       round(risk, 2),
-        **{k: round(v, 2) for k, v in sl.items()},
-        **{k: round(v, 2) for k, v in tp.items()},
+        "sent_at":        row["sent_at"],
+        "timestamp":      row["timestamp"],
+        "signal":         signal,
+        "timeframes":     tfs_str,
+        "direction":      "LONG" if is_bullish else "SHORT",
+        "entry":          round(entry, 2),
+        "pivot":          round(pivot, 2),
+        "atr":            round(atr, 2),
+        "risk":           round(risk, 2),
+        "sl_tight":       round(sl["sl_tight"],  2),
+        "sl_normal":      round(sl["sl_normal"], 2),
+        "sl_wide":        round(sl["sl_wide"],   2),
+        "tp_1r":          round(tp["tp_1r"], 2),
+        "tp_2r":          round(tp["tp_2r"], 2),
+        "tp_3r":          round(tp["tp_3r"], 2),
+        "sl_tight_min":   None,
+        "sl_normal_min":  None,
+        "sl_wide_min":    None,
+        "tp_1r_min":      None,
+        "tp_2r_min":      None,
+        "tp_3r_min":      None,
     }
 
     # --- Horizon snapshots ---
     elapsed_h = (post_5m["timestamp"] - sent_at).dt.total_seconds() / 3600
 
     for h in horizons:
-        label   = _horizon_label(h)
-        in_win  = post_5m[elapsed_h <= h]
+        label  = _horizon_label(h)
+        in_win = post_5m[elapsed_h <= h]
         if in_win.empty:
             continue
 
         last_close = float(in_win["close"].iloc[-1])
         change_pct = (last_close - entry) / entry * 100
         if not is_bullish:
-            change_pct = -change_pct  # sign convention: positive = move in signal direction
+            change_pct = -change_pct  # positive = move in signal direction
 
         if is_bullish:
             mfe = float((in_win["high"] - entry).max())
@@ -174,73 +208,50 @@ def _compute_outcome(row: pd.Series, spot_5m: pd.DataFrame) -> Optional[Dict]:
             mfe = float((entry - in_win["low"]).max())
             mae = float((in_win["high"] - entry).max())
 
-        outcome[f"price_{label}"]   = round(last_close, 2)
         outcome[f"chg_pct_{label}"] = round(change_pct, 4)
         outcome[f"mfe_{label}"]     = round(mfe, 2)
         outcome[f"mae_{label}"]     = round(mae, 2)
 
-    # --- First hit detection (candle-by-candle, pessimistic: SL beats TP) ---
-    #
-    # Levels ordered from closest to entry outward — so the first True check
-    # is the first level price would cross when moving against/with entry.
-    #
-    # Pessimistic rule: if both SL and TP are hit within the same candle
-    # (i.e. candle range spans both), SL is recorded as first hit.
+    # --- Independent hit-time detection for each SL and TP level ---
+    # Each level is tracked separately — hitting sl_tight does NOT stop
+    # tracking sl_normal or any TP. This allows comparing outcomes across
+    # all SL/TP combinations in post-analysis.
 
-    if is_bullish:
-        sl_levels = [("sl_tight",  sl["sl_tight"]),
-                     ("sl_normal", sl["sl_normal"]),
-                     ("sl_wide",   sl["sl_wide"])]
-        tp_levels = [("tp_1r", tp["tp_1r"]),
-                     ("tp_2r", tp["tp_2r"]),
-                     ("tp_3r", tp["tp_3r"])]
-    else:
-        sl_levels = [("sl_tight",  sl["sl_tight"]),
-                     ("sl_normal", sl["sl_normal"]),
-                     ("sl_wide",   sl["sl_wide"])]
-        tp_levels = [("tp_1r", tp["tp_1r"]),
-                     ("tp_2r", tp["tp_2r"]),
-                     ("tp_3r", tp["tp_3r"])]
-
-    first_hit       = None
-    time_to_hit_min = None
-    max_min         = max_h * 60
+    sl_check = [
+        ("sl_tight_min",  sl["sl_tight"]),
+        ("sl_normal_min", sl["sl_normal"]),
+        ("sl_wide_min",   sl["sl_wide"]),
+    ]
+    tp_check = [
+        ("tp_1r_min", tp["tp_1r"]),
+        ("tp_2r_min", tp["tp_2r"]),
+        ("tp_3r_min", tp["tp_3r"]),
+    ]
+    max_min = max_h * 60
 
     for _, candle in post_5m.iterrows():
         elapsed_min = (candle["timestamp"] - sent_at).total_seconds() / 60
         if elapsed_min > max_min:
             break
 
-        sl_hit = None
-        tp_hit = None
+        for col, price in sl_check:
+            if outcome[col] is None:
+                if is_bullish and candle["low"] <= price:
+                    outcome[col] = round(elapsed_min, 1)
+                elif not is_bullish and candle["high"] >= price:
+                    outcome[col] = round(elapsed_min, 1)
 
-        for name, price in sl_levels:
-            if is_bullish and candle["low"] <= price:
-                sl_hit = name
-                break
-            if not is_bullish and candle["high"] >= price:
-                sl_hit = name
-                break
+        for col, price in tp_check:
+            if outcome[col] is None:
+                if is_bullish and candle["high"] >= price:
+                    outcome[col] = round(elapsed_min, 1)
+                elif not is_bullish and candle["low"] <= price:
+                    outcome[col] = round(elapsed_min, 1)
 
-        for name, price in tp_levels:
-            if is_bullish and candle["high"] >= price:
-                tp_hit = name
-                break
-            if not is_bullish and candle["low"] <= price:
-                tp_hit = name
-                break
-
-        if sl_hit:
-            first_hit       = sl_hit
-            time_to_hit_min = round(elapsed_min, 1)
+        # Early exit once all levels are hit
+        if all(outcome[c] is not None for c in ["sl_tight_min", "sl_normal_min", "sl_wide_min",
+                                                  "tp_1r_min", "tp_2r_min", "tp_3r_min"]):
             break
-        if tp_hit:
-            first_hit       = tp_hit
-            time_to_hit_min = round(elapsed_min, 1)
-            break
-
-    outcome["first_hit"]       = first_hit or "none"
-    outcome["time_to_hit_min"] = time_to_hit_min
 
     return outcome
 
@@ -255,6 +266,8 @@ def check_outcomes() -> None:
     and append results to signal_outcomes.csv.
 
     Safe to call repeatedly — already-computed outcomes are never rewritten.
+    Unique key: (sent_at, timeframes) — handles multi-TF signals logged as
+    separate rows with the same sent_at.
     """
     if not SIGNAL_LOG_FILE.exists():
         return
@@ -263,14 +276,16 @@ def check_outcomes() -> None:
     if signals_df.empty or "btc_price" not in signals_df.columns:
         return
 
-    # Signals already resolved
+    # Build set of already-resolved (sent_at, timeframes) pairs
     if OUTCOMES_FILE.exists():
         outcomes_df = pd.read_csv(OUTCOMES_FILE)
-        done = set(outcomes_df["sent_at"].astype(str))
+        done = set(zip(outcomes_df["sent_at"].astype(str), outcomes_df["timeframes"].astype(str)))
     else:
         done = set()
 
-    pending = signals_df[~signals_df["sent_at"].astype(str).isin(done)]
+    pending = signals_df[
+        ~signals_df.apply(lambda r: (str(r["sent_at"]), str(r["timeframes"])) in done, axis=1)
+    ]
     if pending.empty:
         return
 
@@ -291,7 +306,8 @@ def check_outcomes() -> None:
                 new_rows.append(outcome)
                 log.info(
                     f"[outcomes] {row['signal']} {row['timeframes']} "
-                    f"@ {row['sent_at']} → first_hit={outcome['first_hit']}"
+                    f"@ {row['sent_at']} → sl_normal_min={outcome['sl_normal_min']} "
+                    f"tp_1r_min={outcome['tp_1r_min']}"
                 )
         except Exception as exc:
             log.warning(f"[outcomes] failed for {row.get('sent_at')}: {exc}")
@@ -299,7 +315,8 @@ def check_outcomes() -> None:
     if not new_rows:
         return
 
-    new_df     = pd.DataFrame(new_rows)
-    write_hdr  = not OUTCOMES_FILE.exists()
+    # Enforce fixed column order — fills missing horizon cols with NaN
+    new_df    = pd.DataFrame(new_rows).reindex(columns=ALL_COLS)
+    write_hdr = not OUTCOMES_FILE.exists()
     new_df.to_csv(OUTCOMES_FILE, mode="a", header=write_hdr, index=False)
     log.info(f"[outcomes] appended {len(new_rows)} rows to signal_outcomes.csv")
