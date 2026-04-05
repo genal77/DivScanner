@@ -210,8 +210,11 @@ def main() -> None:
     futures_5m = _load_parquet(DATA_DIR / "btc_futures_5m.parquet")
     oi_1m      = _load_parquet(DATA_DIR / "btc_oi_1m.parquet")
 
-    needs_backfill = df["cvd_sigma"].isna()
-    log.info(f"Rows needing metric recompute: {needs_backfill.sum()}")
+    # Full recompute: rows missing cvd_sigma
+    # OI-only recompute: rows that have cvd_sigma but lost oi_delta_btc during rename
+    needs_backfill  = df["cvd_sigma"].isna()
+    needs_oi_only   = ~df["cvd_sigma"].isna() & df["oi_delta_btc"].isna()
+    log.info(f"Rows needing full recompute: {needs_backfill.sum()}, OI-only: {needs_oi_only.sum()}")
 
     ok = fail = 0
     for idx in df[needs_backfill].index:
@@ -238,6 +241,28 @@ def main() -> None:
             log.warning(f"[{idx:>2}] error: {exc}")
 
     log.info(f"Backfill: {ok} recovered, {fail} unrecoverable")
+
+    # 6b. OI-only pass: rows that have cvd_sigma but lost oi_delta_btc
+    oi_ok = oi_fail = 0
+    for idx in df[needs_oi_only].index:
+        row = df.loc[idx]
+        tf  = str(row["timeframes"]).strip()
+        try:
+            updates = _backfill_row(row, tf, spot_5m, futures_5m, oi_1m)
+            if updates and updates.get("oi_delta_btc") is not None:
+                df.at[idx, "oi_delta_btc"]      = updates["oi_delta_btc"]
+                df.at[idx, "futures_cvd_delta"]  = updates.get("futures_cvd_delta")
+                df.at[idx, "pivot_from_ts"]      = updates.get("pivot_from_ts")
+                oi_ok += 1
+                log.info(f"[{idx:>2}] OI filled: {str(row['signal']):<22} {tf:<5} → oi_delta_btc={updates['oi_delta_btc']:+.1f}")
+            else:
+                oi_fail += 1
+                log.warning(f"[{idx:>2}] OI not recoverable: {str(row['signal']):<22} {tf:<5}")
+        except Exception as exc:
+            oi_fail += 1
+            log.warning(f"[{idx:>2}] OI error: {exc}")
+
+    log.info(f"OI pass: {oi_ok} filled, {oi_fail} unrecoverable")
 
     # 7. Save
     df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
