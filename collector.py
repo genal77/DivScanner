@@ -881,15 +881,14 @@ def _send_telegram(text: str, image_bytes: Optional[bytes]) -> None:
 def _append_signal_log(signal_data: dict, timeframes: list, current_price: float) -> None:
     """Append one row to the signal log CSV. Creates file with header if it doesn't exist."""
     row = {
-        "timestamp":      pd.Timestamp(signal_data["timestamp"]).isoformat(),
-        "pivot_from_ts":  pd.Timestamp(signal_data["pivot_from_ts"]).isoformat() if signal_data.get("pivot_from_ts") is not None else None,
-        "sent_at":        pd.Timestamp.utcnow().isoformat(),
-        "timeframes":     ",".join(timeframes),
-        "signal":         signal_data["signal"],
-        "price_from":     signal_data.get("price_from"),
-        "price_to":       signal_data.get("price_to"),
-        "cvd_from":       signal_data.get("cvd_from"),
-        "cvd_to":         signal_data.get("cvd_to"),
+        "timestamp":         pd.Timestamp(signal_data["timestamp"]).isoformat(),
+        "sent_at":           pd.Timestamp.utcnow().isoformat(),
+        "timeframes":        ",".join(timeframes),
+        "signal":            signal_data["signal"],
+        "price_from":        signal_data.get("price_from"),
+        "price_to":          signal_data.get("price_to"),
+        "cvd_from":          signal_data.get("cvd_from"),
+        "cvd_to":            signal_data.get("cvd_to"),
         "price_move_pct":    signal_data.get("price_move_pct"),
         "cvd_move_pct":      signal_data.get("cvd_move_pct"),
         "persistence":       signal_data.get("persistence"),
@@ -900,6 +899,7 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
         "futures_cvd_delta": signal_data.get("futures_cvd_delta"),
         "btc_price":         current_price,
         "cvd_mode":          "line",
+        "pivot_from_ts":     pd.Timestamp(signal_data["pivot_from_ts"]).isoformat() if signal_data.get("pivot_from_ts") is not None else None,
     }
     df_row = pd.DataFrame([row])
     write_header = not SIGNAL_LOG_FILE.exists()
