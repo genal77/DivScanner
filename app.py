@@ -153,6 +153,9 @@ app.layout = html.Div(
                 html.Button("Signal Log", id="tab-btn-signal-log", n_clicks=0,
                     style={"background":"none","border":"none","borderBottom":"2px solid transparent",
                            "color":_MUTED,"padding":"8px 20px","cursor":"pointer","fontSize":"12px","fontFamily":"system-ui,sans-serif"}),
+                html.Button("Outcomes",   id="tab-btn-outcomes",   n_clicks=0,
+                    style={"background":"none","border":"none","borderBottom":"2px solid transparent",
+                           "color":_MUTED,"padding":"8px 20px","cursor":"pointer","fontSize":"12px","fontFamily":"system-ui,sans-serif"}),
             ],
         ),
 
@@ -395,6 +398,40 @@ app.layout = html.Div(
             ],
         ),  # end signal-log-area
 
+        # ── Outcomes area ─────────────────────────────────────────────────
+        html.Div(
+            id="outcomes-area",
+            style={"display": "none", "flexDirection": "column", "flex": "1", "minHeight": "0", "overflowY": "auto", "padding": "16px", "backgroundColor": _DARK},
+            children=[
+                html.Div(id="outcomes-meta", style={"color": _MUTED, "fontSize": "11px", "marginBottom": "10px"}),
+                dash.dash_table.DataTable(
+                    id="outcomes-table",
+                    columns=[],
+                    data=[],
+                    sort_action="native",
+                    page_size=50,
+                    style_table={"overflowX": "auto"},
+                    style_header={
+                        "backgroundColor": _PANEL, "color": _MUTED, "fontSize": "11px",
+                        "fontWeight": "normal", "textTransform": "uppercase", "letterSpacing": "0.5px",
+                        "borderBottom": f"1px solid {_BORDER}", "border": "none", "whiteSpace": "nowrap",
+                    },
+                    style_cell={
+                        "backgroundColor": _DARK, "color": _TEXT, "fontSize": "12px",
+                        "border": "none", "borderBottom": f"1px solid {_BORDER}",
+                        "padding": "6px 10px", "whiteSpace": "nowrap", "fontFamily": "monospace",
+                    },
+                    style_data_conditional=[
+                        {"if": {"filter_query": '{direction} = "LONG"'},  "color": "#26a69a"},
+                        {"if": {"filter_query": '{direction} = "SHORT"'}, "color": "#ef5350"},
+                        {"if": {"filter_query": '{first_hit} contains "sl"'}, "color": "#ef5350"},
+                        {"if": {"filter_query": '{first_hit} contains "tp"'}, "color": "#26a69a"},
+                        {"if": {"filter_query": '{first_hit} = "none"'},      "color": _MUTED},
+                    ],
+                ),
+            ],
+        ),  # end outcomes-area
+
         # ── Auto-refresh ticker ───────────────────────────────────────────
         dcc.Interval(id="refresh-interval", interval=REFRESH_MS, n_intervals=0),
         dcc.Interval(id="log-refresh-interval", interval=30_000, n_intervals=0),
@@ -554,31 +591,36 @@ _LOG_COLUMNS = [
 @app.callback(
     Output("chart-area",      "style"),
     Output("signal-log-area", "style"),
+    Output("outcomes-area",   "style"),
     Output("tab-btn-chart",      "style"),
     Output("tab-btn-signal-log", "style"),
+    Output("tab-btn-outcomes",   "style"),
     Input("tab-btn-chart",      "n_clicks"),
     Input("tab-btn-signal-log", "n_clicks"),
+    Input("tab-btn-outcomes",   "n_clicks"),
 )
-def switch_tab(n_chart, n_log):
-    """Toggle chart / signal log visibility based on which tab button was clicked."""
+def switch_tab(n_chart, n_log, n_out):
+    """Toggle chart / signal log / outcomes visibility based on which tab button was clicked."""
     from dash import ctx
-    active = "signal-log" if ctx.triggered_id == "tab-btn-signal-log" else "chart"
+    triggered = ctx.triggered_id or "tab-btn-chart"
+    active = triggered.replace("tab-btn-", "")  # "chart", "signal-log", or "outcomes"
+
     _btn_active   = {"background":"none","border":"none","borderBottom":"2px solid #26a69a",
                      "color":"white","padding":"8px 20px","cursor":"pointer","fontSize":"12px","fontFamily":"system-ui,sans-serif"}
     _btn_inactive = {"background":"none","border":"none","borderBottom":"2px solid transparent",
                      "color":_MUTED,"padding":"8px 20px","cursor":"pointer","fontSize":"12px","fontFamily":"system-ui,sans-serif"}
-    if active == "chart":
-        return (
-            {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0"},
-            {"display":"none"},
-            _btn_active, _btn_inactive,
-        )
-    else:
-        return (
-            {"display":"none"},
-            {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0","overflowY":"auto","padding":"16px","backgroundColor":_DARK},
-            _btn_inactive, _btn_active,
-        )
+    _area_hidden  = {"display":"none"}
+    _area_table   = {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0",
+                     "overflowY":"auto","padding":"16px","backgroundColor":_DARK}
+
+    return (
+        {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0"} if active == "chart" else _area_hidden,
+        _area_table if active == "signal-log" else _area_hidden,
+        _area_table if active == "outcomes"   else _area_hidden,
+        _btn_active if active == "chart"      else _btn_inactive,
+        _btn_active if active == "signal-log" else _btn_inactive,
+        _btn_active if active == "outcomes"   else _btn_inactive,
+    )
 
 
 @app.callback(
@@ -646,6 +688,116 @@ def update_signal_log(_, n_log):
 
     meta = f"{len(df)} sygnałów · ostatni: {_fmt_ts(df['sent_at'].iloc[0])}"
     return _LOG_COLUMNS, rows, meta
+
+
+# ---------------------------------------------------------------------------
+# OUTCOMES
+# ---------------------------------------------------------------------------
+
+_OUTCOMES_FIXED_COLUMNS = [
+    {"name": "Time (UTC+2)",    "id": "time_local"},
+    {"name": "Signal",          "id": "signal"},
+    {"name": "TF",              "id": "timeframes"},
+    {"name": "Dir.",            "id": "direction"},
+    {"name": "Entry",           "id": "entry_fmt"},
+    {"name": "Risk ($)",        "id": "risk_fmt"},
+    {"name": "SL tight",        "id": "sl_tight_fmt"},
+    {"name": "SL normal",       "id": "sl_normal_fmt"},
+    {"name": "SL wide",         "id": "sl_wide_fmt"},
+    {"name": "TP 1R",           "id": "tp_1r_fmt"},
+    {"name": "TP 2R",           "id": "tp_2r_fmt"},
+    {"name": "TP 3R",           "id": "tp_3r_fmt"},
+    {"name": "First Hit",       "id": "first_hit"},
+    {"name": "Time to Hit",     "id": "time_to_hit_fmt"},
+]
+
+
+@app.callback(
+    Output("outcomes-table", "columns"),
+    Output("outcomes-table", "data"),
+    Output("outcomes-meta",  "children"),
+    Input("log-refresh-interval", "n_intervals"),
+    Input("tab-btn-outcomes",     "n_clicks"),
+)
+def update_outcomes(_, n_out):
+    """Load signal_outcomes.csv and format for DataTable. Triggered on tab switch and every 30s."""
+    from dash import ctx
+    if ctx.triggered_id == "log-refresh-interval" and (n_out or 0) == 0:
+        return dash.no_update, dash.no_update, dash.no_update
+
+    outcomes_path = DATA_DIR / "signal_outcomes.csv"
+    if not outcomes_path.exists():
+        return _OUTCOMES_FIXED_COLUMNS, [], "Brak danych — signal_outcomes.csv nie istnieje."
+
+    df = pd.read_csv(outcomes_path)
+    if df.empty:
+        return _OUTCOMES_FIXED_COLUMNS, [], "Plik istnieje, ale nie zawiera jeszcze żadnych wyników."
+
+    df = df.sort_values("sent_at", ascending=False)
+
+    _WA = ZoneInfo("Europe/Warsaw")
+
+    def _fmt_ts(ts_str):
+        try:
+            return pd.Timestamp(ts_str).tz_convert(_WA).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ts_str
+
+    def _fmt_price(val):
+        try:
+            return f"{float(val):,.2f}"
+        except Exception:
+            return "—"
+
+    def _fmt_time_to_hit(val):
+        try:
+            mins = float(val)
+            if mins < 60:
+                return f"{mins:.0f}m"
+            return f"{mins/60:.1f}h"
+        except Exception:
+            return "—"
+
+    # Discover dynamic horizon columns (chg_pct_* present in CSV)
+    horizon_cols = sorted([c for c in df.columns if c.startswith("chg_pct_")])
+    dynamic_columns = [{"name": c.replace("chg_pct_", "Δ% "), "id": c} for c in horizon_cols]
+    all_columns = _OUTCOMES_FIXED_COLUMNS + dynamic_columns
+
+    rows = []
+    for _, r in df.iterrows():
+        row = {
+            "time_local":    _fmt_ts(r.get("sent_at", "")),
+            "signal":        r.get("signal", ""),
+            "timeframes":    r.get("timeframes", ""),
+            "direction":     r.get("direction", ""),
+            "entry_fmt":     _fmt_price(r.get("entry")),
+            "risk_fmt":      _fmt_price(r.get("risk")),
+            "sl_tight_fmt":  _fmt_price(r.get("sl_tight")),
+            "sl_normal_fmt": _fmt_price(r.get("sl_normal")),
+            "sl_wide_fmt":   _fmt_price(r.get("sl_wide")),
+            "tp_1r_fmt":     _fmt_price(r.get("tp_1r")),
+            "tp_2r_fmt":     _fmt_price(r.get("tp_2r")),
+            "tp_3r_fmt":     _fmt_price(r.get("tp_3r")),
+            "first_hit":     r.get("first_hit", "—"),
+            "time_to_hit_fmt": _fmt_time_to_hit(r.get("time_to_hit_min")),
+        }
+        for col in horizon_cols:
+            try:
+                val = float(r[col])
+                row[col] = f"{val:+.2f}%"
+            except Exception:
+                row[col] = "—"
+        rows.append(row)
+
+    resolved   = df[df["first_hit"].notna() & (df["first_hit"] != "none")]
+    tp_hits    = resolved[resolved["first_hit"].str.startswith("tp", na=False)]
+    sl_hits    = resolved[resolved["first_hit"].str.startswith("sl", na=False)]
+    meta = (
+        f"{len(df)} wyników · TP: {len(tp_hits)} · SL: {len(sl_hits)} · "
+        f"pending: {len(df) - len(resolved)} · "
+        f"ostatni: {_fmt_ts(df['sent_at'].iloc[0])}"
+    )
+    return all_columns, rows, meta
 
 
 # ---------------------------------------------------------------------------

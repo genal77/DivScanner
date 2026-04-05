@@ -56,7 +56,7 @@ def _backfill_row(row: pd.Series, tf: str,
                   oi_1m: pd.DataFrame) -> Optional[dict]:
     """
     Recompute all quality metrics for one signal at a specific TF.
-    Uses cvd_mode='candle' to match the original detection logic.
+    Uses cvd_mode from the row itself to match the original detection logic.
     Returns dict of updated fields, or None if unrecoverable.
     """
     from analysis import (
@@ -68,6 +68,7 @@ def _backfill_row(row: pd.Series, tf: str,
     signal_ts = pd.Timestamp(row["timestamp"])
     signal    = str(row["signal"])
     interval  = INTERVAL_MAP.get(tf, "5min")
+    cvd_mode  = str(row.get("cvd_mode", "candle")) if pd.notna(row.get("cvd_mode")) else "candle"
 
     spot_hist = spot_5m[spot_5m["timestamp"] <= signal_ts]
     if spot_hist.empty:
@@ -82,7 +83,7 @@ def _backfill_row(row: pd.Series, tf: str,
     if price_df.empty or cvd_df.empty:
         return None
 
-    low_data, high_data = detect_spot_signals(price_df, cvd_df, cvd_mode="candle")
+    low_data, high_data = detect_spot_signals(price_df, cvd_df, cvd_mode=cvd_mode)
 
     is_sell   = "SELL" in signal.upper()
     candidate = low_data if is_sell else high_data
