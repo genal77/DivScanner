@@ -88,13 +88,10 @@ def load_parquet(filepath: Path) -> pd.DataFrame:
 
 
 def save_parquet(df: pd.DataFrame, filepath: Path) -> None:
-    """Save DataFrame to parquet, pruning data older than HISTORY_DAYS."""
+    """Save DataFrame to parquet. Full history is retained — no pruning."""
     if df.empty:
         return
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)
-    if "timestamp" in df.columns:
-        df = df[df["timestamp"] >= cutoff]
     df.to_parquet(filepath, index=False)
 
 
