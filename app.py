@@ -547,6 +547,7 @@ _LOG_COLUMNS = [
     {"name": "OI Δ%",          "id": "oi_delta_fmt"},
     {"name": "Fut.CVD Δ",      "id": "futures_cvd_fmt"},
     {"name": "BTC price",      "id": "btc_price"},
+    {"name": "CVD mode",       "id": "cvd_mode"},
 ]
 
 
@@ -640,6 +641,7 @@ def update_signal_log(_, n_log):
             "oi_delta_fmt":  f"{r['oi_delta_pct']:+.3f}%"   if pd.notna(r.get("oi_delta_pct"))    else "—",
             "futures_cvd_fmt": f"{r['futures_cvd_delta']:+,.0f}" if pd.notna(r.get("futures_cvd_delta")) else "—",
             "btc_price":     f"{r['btc_price']:,.2f}"        if pd.notna(r.get("btc_price"))        else "—",
+            "cvd_mode":      r.get("cvd_mode", "candle"),
         })
 
     meta = f"{len(df)} sygnałów · ostatni: {_fmt_ts(df['sent_at'].iloc[0])}"

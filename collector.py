@@ -898,6 +898,7 @@ def _append_signal_log(signal_data: dict, timeframes: list, current_price: float
         "oi_delta_pct":      signal_data.get("oi_delta_pct"),
         "futures_cvd_delta": signal_data.get("futures_cvd_delta"),
         "btc_price":         current_price,
+        "cvd_mode":          "line",
     }
     df_row = pd.DataFrame([row])
     write_header = not SIGNAL_LOG_FILE.exists()
