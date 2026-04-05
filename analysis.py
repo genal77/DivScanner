@@ -664,9 +664,9 @@ def build_figure(
             for data in (low_data, high_data):
                 if not data:
                     continue
-                color = "#2196f3" if "SELLER" in data["signal"] else "orange"
+                color = "#2196f3" if "SELL" in data["signal"] else "orange"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
-                is_low = "SELLER" in data["signal"]
+                is_low = "SELL" in data["signal"]
                 p_col  = "p_low"    if is_low else "p_high"
                 c_col  = cvd_lo_col if is_low else cvd_hi_col
                 sign   = -1         if is_low else +1
@@ -953,9 +953,9 @@ def build_alert_figure(
             for data in (low_data, high_data):
                 if not data:
                     continue
-                color = "#2196f3" if "SELLER" in data["signal"] else "orange"
+                color = "#2196f3" if "SELL" in data["signal"] else "orange"
                 dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
-                is_low = "SELLER" in data["signal"]
+                is_low = "SELL" in data["signal"]
                 p_col, c_col = ("p_low", "cvd_low") if is_low else ("p_high", "cvd_high")
                 sign   = -1 if is_low else +1
                 pivots = p_lows if is_low else p_highs
