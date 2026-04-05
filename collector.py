@@ -813,14 +813,14 @@ def _format_alert_message(
                 oi_pct   = oi_delta / oi_a * 100
                 oi_arrow = "↑" if oi_delta >= 0 else "↓"
                 oi_label = "new positions" if oi_delta >= 0 else "covering"
-                oi_str   = f"OI:    {oi_arrow} {oi_delta:+,.0f} BTC ({oi_pct:+.2f}%)· {oi_label}\n"
+                oi_str   = f"OI:      {oi_arrow} {oi_delta:+,.0f} BTC ({oi_pct:+.2f}%) · {oi_label}\n"
         except Exception:
             pass
 
     return (
         f"{emoji} <b>{sig}</b> {tf_str}\n"
         f"Price: {p_arrow} {p_delta_usd:+,.2f} USD  [{p_pct:+.2f}%]\n"
-        f"CVD S: {c_arrow} {net_delta:+,.0f} BTC\n"
+        f"CVD : {c_arrow} {net_delta:+,.0f} BTC\n"
         f"{oi_str}"
         f"\n"
         f"{score_line}"
