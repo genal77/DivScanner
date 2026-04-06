@@ -1029,10 +1029,6 @@ def check_and_alert(state: dict) -> None:
             if ts_str == state[tf].get(key):
                 continue  # already alerted for this candle
             _enrich_signal_with_market_context(signal_data, oi_df, cvd_futures_df)
-            score = signal_data.get("div_score")
-            if score is None or score < MIN_DIV_SCORE:
-                log.info(f"[alert] filtered {tf} {signal_data['signal']} — div_score {score} < {MIN_DIV_SCORE}")
-                continue
             state[tf][key] = ts_str
             sig_name = signal_data["signal"]
             if sig_name not in pending:

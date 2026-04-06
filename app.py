@@ -266,7 +266,7 @@ app.layout = html.Div(
                                         dcc.RadioItems(
                                             id="cvd-spot-mode",
                                             options=[{"label": "Candle", "value": "candle"}, {"label": "Line", "value": "line"}],
-                                            value="candle",
+                                            value="line",
                                             inline=True,
                                             inputStyle={**_CHECKLIST_INPUT, "marginTop": "8px"},
                                             labelStyle={**_CHECKLIST_LABEL, "fontSize": "11px"},
@@ -558,7 +558,7 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
         show_pivots=bool(show_pivots_val),
         pivot_left=pivot_lb  or PIVOT_WINDOW,
         pivot_right=pivot_rb or PIVOT_WINDOW,
-        cvd_spot_mode=cvd_spot_mode    or "candle",
+        cvd_spot_mode=cvd_spot_mode    or "line",
         cvd_futures_mode=cvd_futures_mode or "candle",
         oi_mode=oi_mode                or "candle",
     )

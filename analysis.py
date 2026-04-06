@@ -485,7 +485,7 @@ def build_figure(
         rows=5, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.01,
-        row_heights=[0.36, 0.18, 0.18, 0.18, 0.10],
+        row_heights=[0.36, 0.10, 0.18, 0.18, 0.18],
     )
 
     def candlestick(df, x, o, h, l, c, name, row):
@@ -542,31 +542,7 @@ def build_figure(
             xanchor="left",
         )
 
-    # Panel 2 — CVD Spot
-    if not cvd_spot_df.empty:
-        if cvd_spot_mode == "line":
-            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 2, color="white")
-        else:
-            candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
-            spike_trigger(cvd_spot_df, "timestamp", 2)
-
-    # Panel 3 — CVD Futures
-    if not cvd_futures_df.empty:
-        if cvd_futures_mode == "line":
-            linechart(cvd_futures_df, "timestamp", "cvd_close", "CVD Futures", 3, color="#ab47bc")
-        else:
-            candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 3)
-            spike_trigger(cvd_futures_df, "timestamp", 3)
-
-    # Panel 4 — OI
-    if not oi_df.empty:
-        if oi_mode == "line":
-            linechart(oi_df, "timestamp", "close", "Open Interest", 4, color="#ef5350")
-        else:
-            candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
-            spike_trigger(oi_df, "timestamp", 4)
-
-    # Panel 5 — Delta Spot
+    # Panel 2 — Delta Spot
     if not cvd_spot_df.empty:
         delta = cvd_spot_df["cvd_close"] - cvd_spot_df["cvd_open"]
         bar_colors = [CANDLE_UP if d >= 0 else CANDLE_DOWN for d in delta]
@@ -576,8 +552,32 @@ def build_figure(
             marker_color=bar_colors,
             marker_line_width=0,
             name="Delta Spot",
-        ), row=5, col=1)
-        spike_trigger(cvd_spot_df, "timestamp", 5)
+        ), row=2, col=1)
+        spike_trigger(cvd_spot_df, "timestamp", 2)
+
+    # Panel 3 — CVD Spot
+    if not cvd_spot_df.empty:
+        if cvd_spot_mode == "line":
+            linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 3, color="white")
+        else:
+            candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 3)
+            spike_trigger(cvd_spot_df, "timestamp", 3)
+
+    # Panel 4 — CVD Futures
+    if not cvd_futures_df.empty:
+        if cvd_futures_mode == "line":
+            linechart(cvd_futures_df, "timestamp", "cvd_close", "CVD Futures", 4, color="#ab47bc")
+        else:
+            candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 4)
+            spike_trigger(cvd_futures_df, "timestamp", 4)
+
+    # Panel 5 — OI
+    if not oi_df.empty:
+        if oi_mode == "line":
+            linechart(oi_df, "timestamp", "close", "Open Interest", 5, color="#ef5350")
+        else:
+            candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 5)
+            spike_trigger(oi_df, "timestamp", 5)
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals     = []   # (color, label) for banner
@@ -644,7 +644,7 @@ def build_figure(
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 s = _shift(p1, p2, cvd_lo_col, -1)
                 draw_line(t0, merged["p_low"].iloc[p1],              t1, merged["p_low"].iloc[p2],              color, dash, 1.5, 1)
-                draw_line(t0, merged[cvd_lo_col].iloc[p1] - s,       t1, merged[cvd_lo_col].iloc[p2] - s,       color, dash, 1.5, 2)
+                draw_line(t0, merged[cvd_lo_col].iloc[p1] - s,       t1, merged[cvd_lo_col].iloc[p2] - s,       color, dash, 1.5, 3)
 
             # Historical high divergences (always drawn)
             for i in range(1, len(p_highs)):
@@ -657,7 +657,7 @@ def build_figure(
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 s = _shift(p1, p2, cvd_hi_col, +1)
                 draw_line(t0, merged["p_high"].iloc[p1],             t1, merged["p_high"].iloc[p2],             color, dash, 1.5, 1)
-                draw_line(t0, merged[cvd_hi_col].iloc[p1] + s,       t1, merged[cvd_hi_col].iloc[p2] + s,       color, dash, 1.5, 2)
+                draw_line(t0, merged[cvd_hi_col].iloc[p1] + s,       t1, merged[cvd_hi_col].iloc[p2] + s,       color, dash, 1.5, 3)
 
             # Live signal — current candle vs last confirmed pivot
             low_data, high_data = detect_spot_signals(price_df, cvd_spot_df, cvd_mode=cvd_spot_mode)
@@ -676,14 +676,14 @@ def build_figure(
                     t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
                     s = _shift(last_p, curr, c_col, sign)
                     draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
-                    draw_line(t0, merged[c_col].iloc[last_p] + sign * s, t1, merged[c_col].iloc[curr] + sign * s, color, dash, 3, 2)
-                p_pct = data.get("price_move_pct")
-                c_pct = data.get("cvd_move_pct")
-                score = data.get("div_score")
-                metrics = ""
-                if p_pct is not None and c_pct is not None:
-                    score_str = f"  Δ{score:.1f}%" if score is not None else ""
-                    metrics = f"  ·  price {p_pct:+.2f}%  CVD {c_pct:+.2f}%{score_str}"
+                    draw_line(t0, merged[c_col].iloc[last_p] + sign * s, t1, merged[c_col].iloc[curr] + sign * s, color, dash, 3, 3)
+                atr_ratio = data.get("price_atr_ratio")
+                cvd_sigma = data.get("cvd_sigma")
+                score     = data.get("div_score")
+                metrics   = ""
+                if atr_ratio is not None and cvd_sigma is not None:
+                    score_str = f"  Δ{score*100:.0f}%" if score is not None else ""
+                    metrics = f"  ·  {atr_ratio:.1f}×ATR  {cvd_sigma:.1f}σ{score_str}"
                 active_signals.append((color, f"{data['signal']}{metrics}"))
                 active_signal_data.append(data)
 
@@ -739,10 +739,10 @@ def build_figure(
     # Panel labels — pinned inside each panel just below its top border
     panel_labels = [
         (1.000, "BTC/USDT  ·  Binance Spot"),
-        (0.644, "CVD Spot  ·  Aggregated  · BTC"),
-        (0.462, "CVD Futures  ·  Aggregated  · BTC"),
-        (0.279, "Open Interest  ·  Binance Futures"),
-        (0.096, "Delta Spot  ·  Aggregated  · BTC"),
+        (0.644, "Delta Spot  ·  Aggregated  · BTC"),
+        (0.538, "CVD Spot  ·  Aggregated  · BTC"),
+        (0.356, "CVD Futures  ·  Aggregated  · BTC"),
+        (0.173, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
@@ -848,10 +848,10 @@ def build_alert_figure(
     oi_df          = _to_waw(oi_df)
 
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=5, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.01,
-        row_heights=[0.40, 0.20, 0.20, 0.20],
+        row_heights=[0.35, 0.10, 0.20, 0.18, 0.17],
     )
 
     def candlestick(df, x, o, h, l, c, name, row):
@@ -861,6 +861,14 @@ def build_alert_figure(
             increasing_line_color=CANDLE_UP,   increasing_fillcolor=CANDLE_UP,
             decreasing_line_color=CANDLE_DOWN, decreasing_fillcolor=CANDLE_DOWN,
             line_width=1,
+        ), row=row, col=1)
+
+    def linechart(df, x, y, name, row, color="#26a69a"):
+        fig.add_trace(go.Scatter(
+            x=df[x], y=df[y],
+            mode="lines",
+            name=name,
+            line=dict(color=color, width=1.5),
         ), row=row, col=1)
 
     if not price_df.empty:
@@ -881,11 +889,20 @@ def build_alert_figure(
         )
 
     if not cvd_spot_df.empty:
-        candlestick(cvd_spot_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Spot", 2)
+        delta = cvd_spot_df["cvd_close"] - cvd_spot_df["cvd_open"]
+        bar_colors = [CANDLE_UP if d >= 0 else CANDLE_DOWN for d in delta]
+        fig.add_trace(go.Bar(
+            x=cvd_spot_df["timestamp"],
+            y=delta,
+            marker_color=bar_colors,
+            marker_line_width=0,
+            name="Delta Spot",
+        ), row=2, col=1)
+        linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 3, color="white")
     if not cvd_futures_df.empty:
-        candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 3)
+        candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 4)
     if not oi_df.empty:
-        candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 4)
+        candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 5)
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals = []
@@ -935,7 +952,7 @@ def build_alert_figure(
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 s = _shift_a(p1, p2, "cvd_close", -1)
                 draw_line(t0, merged["p_low"].iloc[p1],                t1, merged["p_low"].iloc[p2],                color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_close"].iloc[p1] - s,        t1, merged["cvd_close"].iloc[p2] - s,        color, dash, 1.5, 2)
+                draw_line(t0, merged["cvd_close"].iloc[p1] - s,        t1, merged["cvd_close"].iloc[p2] - s,        color, dash, 1.5, 3)
 
             for i in range(1, len(p_highs)):
                 p1, p2 = p_highs[i - 1], p_highs[i]
@@ -947,7 +964,7 @@ def build_alert_figure(
                 t0, t1 = merged["timestamp"].iloc[p1], merged["timestamp"].iloc[p2]
                 s = _shift_a(p1, p2, "cvd_close", +1)
                 draw_line(t0, merged["p_high"].iloc[p1],               t1, merged["p_high"].iloc[p2],               color, dash, 1.5, 1)
-                draw_line(t0, merged["cvd_close"].iloc[p1] + s,        t1, merged["cvd_close"].iloc[p2] + s,        color, dash, 1.5, 2)
+                draw_line(t0, merged["cvd_close"].iloc[p1] + s,        t1, merged["cvd_close"].iloc[p2] + s,        color, dash, 1.5, 3)
 
             # Live signal — already detected on UTC data before timezone conversion
             for data in (low_data, high_data):
@@ -965,15 +982,15 @@ def build_alert_figure(
                     t1 = merged["timestamp"].iloc[curr]
                     s  = _shift_a(last_p, curr, c_col, sign)
                     draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
-                    draw_line(t0, merged[c_col].iloc[last_p] + sign * s, t1, merged[c_col].iloc[curr] + sign * s, color, dash, 3, 2)
+                    draw_line(t0, merged[c_col].iloc[last_p] + sign * s, t1, merged[c_col].iloc[curr] + sign * s, color, dash, 3, 3)
 
-                p_pct = data.get("price_move_pct")
-                c_pct = data.get("cvd_move_pct")
-                score = data.get("div_score")
-                metrics = ""
-                if p_pct is not None and c_pct is not None:
-                    score_str = f"  Δ{score:.1f}%" if score is not None else ""
-                    metrics = f"  ·  price {p_pct:+.2f}%  CVD {c_pct:+.2f}%{score_str}"
+                atr_ratio = data.get("price_atr_ratio")
+                cvd_sigma = data.get("cvd_sigma")
+                score     = data.get("div_score")
+                metrics   = ""
+                if atr_ratio is not None and cvd_sigma is not None:
+                    score_str = f"  Δ{score*100:.0f}%" if score is not None else ""
+                    metrics = f"  ·  {atr_ratio:.1f}×ATR  {cvd_sigma:.1f}σ{score_str}"
                 active_signals.append((color, f"{data['signal']}{metrics}"))
 
     # Banner — inside chart, top of panel 1
@@ -992,10 +1009,11 @@ def build_alert_figure(
 
     # Panel labels — pinned inside each panel just below its top border
     panel_labels = [
-        (1.0,   "BTC/USDT  ·  Binance Spot"),
-        (0.602, "CVD Spot  ·  Aggregated"),
-        (0.398, "CVD Futures  ·  Aggregated"),
-        (0.194, "Open Interest  ·  Binance Futures"),
+        (1.000, "BTC/USDT  ·  Binance Spot"),
+        (0.654, "Delta Spot  ·  Aggregated"),
+        (0.548, "CVD Spot  ·  Aggregated"),
+        (0.346, "CVD Futures  ·  Aggregated"),
+        (0.163, "Open Interest  ·  Binance Futures"),
     ]
     for y_paper, text in panel_labels:
         fig.add_annotation(
