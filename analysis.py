@@ -900,9 +900,9 @@ def build_alert_figure(
         ), row=2, col=1)
         linechart(cvd_spot_df, "timestamp", "cvd_close", "CVD Spot", 3, color="white")
     if not cvd_futures_df.empty:
-        candlestick(cvd_futures_df, "timestamp", "cvd_open", "cvd_high", "cvd_low", "cvd_close", "CVD Futures", 4)
+        linechart(cvd_futures_df, "timestamp", "cvd_close", "CVD Futures", 4, color="#ab47bc")
     if not oi_df.empty:
-        candlestick(oi_df, "timestamp", "open", "high", "low", "close", "Open Interest", 5)
+        linechart(oi_df, "timestamp", "close", "Open Interest", 5, color="#ef5350")
 
     # ── Divergences ───────────────────────────────────────────────────────
     active_signals = []
