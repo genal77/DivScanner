@@ -1343,12 +1343,12 @@ def _format_alert_message(
 
     return (
         f"{emoji} <b>{sig}</b> {tf_str}\n"
+        f"BTC/USDT @ {current_price:,.2f}\n"
         f"Price: {p_arrow} {p_delta_usd:+,.2f} USD  [{p_pct:+.2f}%]\n"
         f"CVD : {c_arrow} {net_delta:+,.0f} BTC\n"
         f"{oi_str}"
         f"\n"
         f"{score_line}"
-        f"BTC/USDT @ {current_price:,.2f}\n"
         f"{ts_str}"
     )
 
