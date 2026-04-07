@@ -11,26 +11,35 @@ Output files:
 
 Spot exchanges:
   Native taker buy (klines): binance
-  Trades aggregation:        bybit, okx, gate, coinbase, kraken
+  WebSocket trade stream:    bybit_spot, okx_spot, gate_spot, mexc_spot, coinbase, kraken
 
 Futures exchanges:
   Native taker buy (klines): binance_futures
-  Trades aggregation:        bybit_futures, okx_futures, gate_futures, mexc_futures
+  WebSocket trade stream:    bybit_futures, okx_futures, gate_futures, mexc_futures
 
 OI: binance_futures (polled every 60s, backfilled via 5m historical endpoint)
+
+WebSocket design:
+  - One persistent WsRunner thread per exchange (daemon)
+  - Automatic reconnect with exponential backoff (5s → 60s max)
+  - Application-level heartbeat for exchanges that require it (Bybit, OKX, MEXC futures)
+  - WebSocket-level ping frames (ping_interval=30s) for all connections
+  - Health monitor: forces reconnect if no trades received for WS_STALE_S seconds
+  - REST fetchers kept for initial warmup snapshot on startup
 """
 
 import json
 import os
 import threading
+import time
+import logging
 
 import requests
 import pandas as pd
-import time
-import logging
+import websocket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -88,11 +97,13 @@ def load_parquet(filepath: Path) -> pd.DataFrame:
 
 
 def save_parquet(df: pd.DataFrame, filepath: Path) -> None:
-    """Save DataFrame to parquet. Full history is retained — no pruning."""
+    """Save DataFrame to parquet using atomic write to prevent partial reads."""
     if df.empty:
         return
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(filepath, index=False)
+    tmp_path = filepath.with_suffix(".tmp.parquet")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, filepath)
 
 
 def upsert_parquet(filepath: Path, new_df: pd.DataFrame) -> int:
@@ -126,8 +137,8 @@ def last_stored_ts(filepath: Path, exchange: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# SPOT — NATIVE TAKER BUY (BINANCE, MEXC)
-# Both use Binance-compatible klines endpoint: field [9] = taker_buy_vol
+# SPOT — NATIVE TAKER BUY (BINANCE)
+# Uses Binance-compatible klines endpoint: field [9] = taker_buy_vol
 # ---------------------------------------------------------------------------
 
 SPOT_NATIVE_ENDPOINTS = {
@@ -136,7 +147,7 @@ SPOT_NATIVE_ENDPOINTS = {
 
 
 def fetch_spot_klines_native(exchange: str, start_ms: int) -> pd.DataFrame:
-    """Fetch spot klines with native taker buy volume (Binance/MEXC)."""
+    """Fetch spot klines with native taker buy volume (Binance)."""
     url = SPOT_NATIVE_ENDPOINTS[exchange]
     params = {"symbol": "BTCUSDT", "interval": "5m", "limit": 1000, "startTime": start_ms}
     resp = requests.get(url, params=params, timeout=10)
@@ -248,8 +259,8 @@ def update_futures_binance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TRADES FETCHERS — raw trades for exchanges without native taker buy
-# Each returns a DataFrame with columns: timestamp, price, size, is_buyer
+# REST TRADE FETCHERS — used only for initial warmup snapshot on startup
+# These seed the buffer before WebSocket connections come online.
 # ---------------------------------------------------------------------------
 
 def fetch_trades_mexc_spot() -> pd.DataFrame:
@@ -366,10 +377,8 @@ def fetch_trades_gate_futures() -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(
-        pd.to_numeric(df["create_time_ms"] if "create_time_ms" in df.columns else df["create_time"].astype(float) * 1000),
-        unit="ms", utc=True,
-    )
+    # Gate API returns create_time_ms as float seconds (not ms despite the name) — multiply by 1000
+    df["timestamp"] = pd.to_datetime(df["create_time"].astype(float) * 1000, unit="ms", utc=True)
     df["price"] = df["price"].astype(float)
     df["size_raw"] = df["size"].astype(float)
     # Gate futures: positive size = buy, negative size = sell (no separate 'side' field)
@@ -398,21 +407,10 @@ def fetch_trades_coinbase() -> pd.DataFrame:
     return df[["timestamp", "price", "size", "is_buyer"]]
 
 
-# Kraken tracks its own `since` cursor to avoid missing trades between polls
-_kraken_since: Optional[str] = None
-
-
 def fetch_trades_kraken() -> pd.DataFrame:
-    """
-    Fetch BTC/USD trades from Kraken.
-    Uses `since` cursor to fetch only new trades on each call.
-    """
-    global _kraken_since
+    """Fetch recent BTC/USD trades from Kraken (last ~1000 trades)."""
     url = "https://api.kraken.com/0/public/Trades"
     params = {"pair": "XBTUSD"}
-    if _kraken_since:
-        params["since"] = _kraken_since
-
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
@@ -422,9 +420,6 @@ def fetch_trades_kraken() -> pd.DataFrame:
         return pd.DataFrame()
 
     result = data["result"]
-    _kraken_since = result.get("last")  # update cursor for next call
-
-    # Kraken returns trades under the pair key (XXBTZUSD or XBTUSD)
     pair_key = next((k for k in result if k != "last"), None)
     if not pair_key:
         return pd.DataFrame()
@@ -461,8 +456,23 @@ def fetch_trades_mexc_futures() -> pd.DataFrame:
     return df[["timestamp", "price", "size", "is_buyer"]]
 
 
+# REST fetchers mapped to exchange name — used only for initial warmup
+TRADES_EXCHANGES = {
+    "mexc_spot":     (fetch_trades_mexc_spot,                                 "spot"),
+    "bybit_spot":    (lambda: fetch_trades_bybit(category="spot"),            "spot"),
+    "okx_spot":      (lambda: fetch_trades_okx(inst_id="BTC-USDT"),           "spot"),
+    "gate_spot":     (fetch_trades_gate_spot,                                  "spot"),
+    "coinbase":      (fetch_trades_coinbase,                                   "spot"),
+    "kraken":        (fetch_trades_kraken,                                     "spot"),
+    "bybit_futures": (lambda: fetch_trades_bybit(category="linear"),           "futures"),
+    "okx_futures":   (lambda: fetch_trades_okx(inst_id="BTC-USDT-SWAP"),      "futures"),
+    "gate_futures":  (fetch_trades_gate_futures,                               "futures"),
+    "mexc_futures":  (fetch_trades_mexc_futures,                               "futures"),
+}
+
+
 # ---------------------------------------------------------------------------
-# TRADES BUFFER — in-memory accumulator for trades-based exchanges
+# TRADE BUFFER — thread-safe in-memory accumulator
 # ---------------------------------------------------------------------------
 
 _trades_buffer: dict = {
@@ -478,15 +488,21 @@ _trades_buffer: dict = {
     "mexc_futures":   pd.DataFrame(),
 }
 
+# One lock per exchange — protects concurrent access from WS threads vs flush thread
+_buffer_locks: dict = {ex: threading.Lock() for ex in _trades_buffer}
+
 
 def update_buffer(exchange: str, new_trades: pd.DataFrame) -> None:
-    """Add new trades to buffer, keep only last TRADES_BUFFER_MINUTES minutes."""
+    """Add new trades to buffer under lock, keep only last TRADES_BUFFER_MINUTES minutes."""
     if new_trades.empty:
         return
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=TRADES_BUFFER_MINUTES)
-    combined = pd.concat([_trades_buffer[exchange], new_trades], ignore_index=True)
-    combined = combined[combined["timestamp"] > cutoff].drop_duplicates()
-    _trades_buffer[exchange] = combined
+    with _buffer_locks[exchange]:
+        combined = pd.concat([_trades_buffer[exchange], new_trades], ignore_index=True)
+        combined = combined[combined["timestamp"] > cutoff].drop_duplicates(
+            subset=["timestamp", "price", "size"]
+        ).reset_index(drop=True)
+        _trades_buffer[exchange] = combined
 
 
 def aggregate_trades_to_candles(trades: pd.DataFrame, exchange: str) -> pd.DataFrame:
@@ -516,14 +532,16 @@ def aggregate_trades_to_candles(trades: pd.DataFrame, exchange: str) -> pd.DataF
 def flush_buffer_to_parquet(exchange: str, market_type: str) -> None:
     """
     Aggregate completed 5m candles from buffer and write to parquet.
+    Takes a snapshot of the buffer under lock, then processes outside the lock.
     Only flushes candles that are fully closed (not the currently forming one).
     """
-    buf = _trades_buffer[exchange]
+    with _buffer_locks[exchange]:
+        buf = _trades_buffer[exchange].copy()
+
     if buf.empty:
         return
 
     now = datetime.now(timezone.utc)
-    # Round down to start of current 5m candle
     current_candle_start = now.replace(second=0, microsecond=0)
     current_candle_start = current_candle_start - timedelta(minutes=current_candle_start.minute % 5)
 
@@ -538,7 +556,512 @@ def flush_buffer_to_parquet(exchange: str, market_type: str) -> None:
     filepath = DATA_DIR / f"btc_{market_type}_5m.parquet"
     n = upsert_parquet(filepath, candles)
     if n:
-        log.info(f"[{exchange}] {market_type}: +{n} candles (trades)")
+        log.info(f"[{exchange}] {market_type}: +{n} candles (ws)")
+
+
+# ---------------------------------------------------------------------------
+# WEBSOCKET — real-time trade streams for all non-Binance exchanges
+# ---------------------------------------------------------------------------
+
+# Exchange → market type, used by collect_cycle for flushing
+_WS_EXCHANGE_MARKET: dict = {
+    "mexc_spot":     "spot",
+    "bybit_spot":    "spot",
+    "okx_spot":      "spot",
+    "gate_spot":     "spot",
+    "coinbase":      "spot",
+    "kraken":        "spot",
+    "bybit_futures": "futures",
+    "okx_futures":   "futures",
+    "gate_futures":  "futures",
+    "mexc_futures":  "futures",
+}
+
+
+# ------------------------------------------------------------------
+# Per-exchange message parsers
+# Each returns a DataFrame with columns: timestamp, price, size, is_buyer
+# Returns empty DataFrame on any parse error or non-trade message.
+# ------------------------------------------------------------------
+
+def _parse_bybit(exchange: str, msg: str) -> pd.DataFrame:
+    """
+    Parse Bybit V5 publicTrade message.
+    Size (v) is in BTC for both spot and linear perpetual.
+    S: 'Buy' = taker buy, 'Sell' = taker sell.
+    """
+    data = json.loads(msg)
+    if data.get("op") == "pong" or "data" not in data:
+        return pd.DataFrame()
+    trades = data["data"]
+    if not trades:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "timestamp": pd.Timestamp(int(t["T"]), unit="ms", tz="UTC"),
+        "price":     float(t["p"]),
+        "size":      float(t["v"]),
+        "is_buyer":  t["S"] == "Buy",
+    } for t in trades])
+
+
+def _parse_okx(exchange: str, msg: str) -> pd.DataFrame:
+    """
+    Parse OKX trades channel message.
+    Spot (BTC-USDT): sz in BTC.
+    Futures (BTC-USDT-SWAP): sz in contracts, 1 contract = 0.01 BTC.
+    """
+    if msg == "pong":
+        return pd.DataFrame()
+    data = json.loads(msg)
+    if data.get("event") in ("subscribe", "error") or "data" not in data:
+        return pd.DataFrame()
+    is_futures = (exchange == "okx_futures")
+    return pd.DataFrame([{
+        "timestamp": pd.Timestamp(int(t["ts"]), unit="ms", tz="UTC"),
+        "price":     float(t["px"]),
+        "size":      float(t["sz"]) * (0.01 if is_futures else 1.0),
+        "is_buyer":  t["side"] == "buy",
+    } for t in data["data"]])
+
+
+def _gate_ts(raw) -> pd.Timestamp:
+    """
+    Gate.io timestamp helper.
+    Gate REST returns create_time_ms as float seconds (bug). Gate WS may return
+    actual milliseconds. Handles both by checking magnitude.
+    """
+    val = float(raw)
+    if val < 1e12:          # looks like seconds — convert to ms
+        val *= 1000
+    return pd.Timestamp(int(val), unit="ms", tz="UTC")
+
+
+def _parse_gate_spot(msg: str) -> pd.DataFrame:
+    """
+    Parse Gate.io spot.trades WebSocket message.
+    amount is in BTC. side: 'buy' = taker buy.
+    """
+    data = json.loads(msg)
+    if data.get("event") != "update" or data.get("channel") != "spot.trades":
+        return pd.DataFrame()
+    r = data.get("result", {})
+    if not r:
+        return pd.DataFrame()
+    ts_raw = r.get("create_time_ms") or r.get("create_time", 0)
+    return pd.DataFrame([{
+        "timestamp": _gate_ts(ts_raw),
+        "price":     float(r["price"]),
+        "size":      float(r["amount"]),
+        "is_buyer":  r["side"] == "buy",
+    }])
+
+
+def _parse_gate_futures(msg: str) -> pd.DataFrame:
+    """
+    Parse Gate.io futures.trades WebSocket message.
+    size positive = buy, negative = sell.
+    1 contract = 1 USD → divide by price for BTC.
+    """
+    data = json.loads(msg)
+    if data.get("event") != "update" or data.get("channel") != "futures.trades":
+        return pd.DataFrame()
+    results = data.get("result", [])
+    if not results:
+        return pd.DataFrame()
+    rows = []
+    for t in results:
+        size_raw = float(t["size"])
+        price    = float(t["price"])
+        ts_raw   = t.get("create_time_ms") or t.get("create_time", 0)
+        rows.append({
+            "timestamp": _gate_ts(ts_raw),
+            "price":     price,
+            "size":      abs(size_raw) / price,
+            "is_buyer":  size_raw > 0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _parse_mexc_spot(msg: str) -> pd.DataFrame:
+    """
+    Parse MEXC spot deals WebSocket message.
+    v is in BTC. S: 1 = taker buy, 2 = taker sell.
+    """
+    data = json.loads(msg)
+    deals = data.get("d", {}).get("deals", [])
+    if not deals:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "timestamp": pd.Timestamp(int(t["t"]), unit="ms", tz="UTC"),
+        "price":     float(t["p"]),
+        "size":      float(t["v"]),
+        "is_buyer":  int(t["S"]) == 1,
+    } for t in deals])
+
+
+def _parse_mexc_futures(msg: str) -> pd.DataFrame:
+    """
+    Parse MEXC futures push.deal WebSocket message.
+    v in contracts, 1 contract = 1 USDT → divide by price for BTC.
+    T: 1 = buy, 2 = sell.
+    Message format: {"channel": "push.deal", "data": [{...}], "symbol": "BTC_USDT", "ts": ...}
+    Note: data is a list directly, not a dict with a "deals" key.
+    """
+    data = json.loads(msg)
+    if data.get("channel") != "push.deal":
+        return pd.DataFrame()
+    deals = data.get("data", [])
+    if not isinstance(deals, list) or not deals:
+        return pd.DataFrame()
+    rows = []
+    for t in deals:
+        price = float(t["p"])
+        rows.append({
+            "timestamp": pd.Timestamp(int(t["t"]), unit="ms", tz="UTC"),
+            "price":     price,
+            "size":      float(t["v"]) / price,
+            "is_buyer":  int(t["T"]) == 1,
+        })
+    return pd.DataFrame(rows)
+
+
+def _parse_coinbase(msg: str) -> pd.DataFrame:
+    """
+    Parse Coinbase Exchange WebSocket matches message.
+    side is the taker side: 'buy' = taker buy.
+    """
+    data = json.loads(msg)
+    if data.get("type") not in ("match", "last_match"):
+        return pd.DataFrame()
+    ts = pd.Timestamp(data["time"])
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return pd.DataFrame([{
+        "timestamp": ts,
+        "price":     float(data["price"]),
+        "size":      float(data["size"]),
+        "is_buyer":  data["side"] == "buy",
+    }])
+
+
+def _parse_kraken(msg: str) -> pd.DataFrame:
+    """
+    Parse Kraken V2 trade channel message.
+    side: 'buy' = taker buy.
+    """
+    data = json.loads(msg)
+    if data.get("channel") != "trade" or data.get("type") not in ("update", "snapshot"):
+        return pd.DataFrame()
+    trades = data.get("data", [])
+    if not trades:
+        return pd.DataFrame()
+    rows = []
+    for t in trades:
+        ts = pd.Timestamp(t["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        rows.append({
+            "timestamp": ts,
+            "price":     float(t["price"]),
+            "size":      float(t["qty"]),
+            "is_buyer":  t["side"] == "buy",
+        })
+    return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------
+# WsRunner — manages one WebSocket connection with full error handling
+# ------------------------------------------------------------------
+
+class WsRunner:
+    """
+    Manages a single persistent WebSocket connection for a trade stream.
+
+    Reconnect logic:
+      - Exponential backoff: 5s → 10s → 20s → 40s → 60s (max)
+      - Backoff resets on every successful connect (on_open)
+      - WebSocket-level ping frames (ping_interval=30s, ping_timeout=10s) detect
+        dead TCP connections even when the server is silent
+
+    Heartbeat (application-level ping):
+      - Some exchanges disconnect after ~30s of client inactivity (Bybit, OKX, MEXC)
+      - app_ping_msg is sent in a dedicated daemon thread at app_ping_interval seconds
+      - Thread exits automatically when connection closes
+
+    Stale detection:
+      - last_trade_ts tracks when the last trade arrived
+      - _health_monitor (external) calls ws.close() if stale > WS_STALE_S
+        to force a reconnect even when the TCP connection looks alive
+    """
+
+    WS_STALE_S = 300  # seconds without a trade before forcing reconnect
+
+    def __init__(
+        self,
+        exchange: str,
+        ws_url: str,
+        subscribe_fn: Callable[[], str],    # called on every connect, returns JSON to send
+        parse_fn: Callable[[str], pd.DataFrame],
+        app_ping_msg: Optional[str] = None,  # JSON string sent as heartbeat, or None
+        app_ping_interval: int = 20,         # seconds between heartbeats
+    ) -> None:
+        self.exchange          = exchange
+        self.ws_url            = ws_url
+        self.subscribe_fn      = subscribe_fn
+        self.parse_fn          = parse_fn
+        self.app_ping_msg      = app_ping_msg
+        self.app_ping_interval = app_ping_interval
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._connected        = False
+        self._reconnect_delay  = 5
+        self.last_trade_ts     = 0.0   # time.time() of last parsed trade
+
+    # ------------------------------------------------------------------
+    # WebSocketApp callbacks
+    # ------------------------------------------------------------------
+
+    def _on_open(self, ws: websocket.WebSocketApp) -> None:
+        log.info(f"[{self.exchange}] WS connected")
+        self._connected = True
+        self._reconnect_delay = 5       # reset backoff on successful connect
+        ws.send(self.subscribe_fn())
+        if self.app_ping_msg:
+            threading.Thread(
+                target=self._ping_loop, daemon=True,
+                name=f"ws-ping-{self.exchange}",
+            ).start()
+
+    def _on_message(self, ws: websocket.WebSocketApp, msg: str) -> None:
+        try:
+            trades = self.parse_fn(msg)
+            if not trades.empty:
+                self.last_trade_ts = time.time()
+                update_buffer(self.exchange, trades)
+        except Exception as e:
+            log.debug(f"[{self.exchange}] parse error: {e}")
+
+    def _on_error(self, ws: websocket.WebSocketApp, error: Exception) -> None:
+        log.warning(f"[{self.exchange}] WS error: {error}")
+
+    def _on_close(
+        self,
+        ws: websocket.WebSocketApp,
+        close_status_code: Optional[int],
+        close_msg: Optional[str],
+    ) -> None:
+        self._connected = False
+        log.info(f"[{self.exchange}] WS closed (code={close_status_code})")
+
+    # ------------------------------------------------------------------
+    # Application-level ping loop
+    # ------------------------------------------------------------------
+
+    def _ping_loop(self) -> None:
+        """Send application-level heartbeat while connected."""
+        while self._connected:
+            time.sleep(self.app_ping_interval)
+            if self._connected and self.ws:
+                try:
+                    self.ws.send(self.app_ping_msg)
+                except Exception as e:
+                    log.debug(f"[{self.exchange}] heartbeat error: {e}")
+
+    # ------------------------------------------------------------------
+    # Reconnect loop — runs for the lifetime of the daemon thread
+    # ------------------------------------------------------------------
+
+    def _run_with_reconnect(self) -> None:
+        while True:
+            try:
+                log.info(f"[{self.exchange}] Connecting...")
+                self.ws = websocket.WebSocketApp(
+                    self.ws_url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                # ping_interval sends WebSocket-level ping frames to detect dead connections
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                log.error(f"[{self.exchange}] WS run exception: {e}")
+            finally:
+                self._connected = False
+
+            log.info(f"[{self.exchange}] Reconnecting in {self._reconnect_delay}s...")
+            time.sleep(self._reconnect_delay)
+            self._reconnect_delay = min(self._reconnect_delay * 2, 60)
+
+    def start(self) -> None:
+        """Start the WebSocket connection in a daemon thread."""
+        threading.Thread(
+            target=self._run_with_reconnect, daemon=True,
+            name=f"ws-{self.exchange}",
+        ).start()
+
+
+# ------------------------------------------------------------------
+# WS runner factory
+# ------------------------------------------------------------------
+
+def _static_sub(payload: dict) -> Callable[[], str]:
+    """Subscribe factory for static payloads (no dynamic fields)."""
+    s = json.dumps(payload)
+    return lambda: s
+
+
+def _gate_sub(channel: str, payload: list) -> Callable[[], str]:
+    """Subscribe factory for Gate.io (requires fresh Unix timestamp on each connect)."""
+    return lambda: json.dumps({
+        "time":    int(time.time()),
+        "channel": channel,
+        "event":   "subscribe",
+        "payload": payload,
+    })
+
+
+def _build_ws_runners() -> List[WsRunner]:
+    """Instantiate one WsRunner per non-Binance exchange."""
+    return [
+        # ---- Bybit spot ----
+        # publicTrade.BTCUSDT: size (v) in BTC, S: 'Buy'/'Sell' is taker side
+        # Bybit disconnects after 30s of inactivity → heartbeat every 20s
+        WsRunner(
+            exchange="bybit_spot",
+            ws_url="wss://stream.bybit.com/v5/public/spot",
+            subscribe_fn=_static_sub({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}),
+            parse_fn=lambda msg: _parse_bybit("bybit_spot", msg),
+            app_ping_msg=json.dumps({"op": "ping"}),
+            app_ping_interval=20,
+        ),
+        # ---- Bybit futures (linear perpetual) ----
+        # Same format as spot; size (v) is in BTC for linear BTCUSDT
+        WsRunner(
+            exchange="bybit_futures",
+            ws_url="wss://stream.bybit.com/v5/public/linear",
+            subscribe_fn=_static_sub({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}),
+            parse_fn=lambda msg: _parse_bybit("bybit_futures", msg),
+            app_ping_msg=json.dumps({"op": "ping"}),
+            app_ping_interval=20,
+        ),
+        # ---- OKX spot ----
+        # sz in BTC. OKX expects string "ping" every ≤30s or it disconnects
+        WsRunner(
+            exchange="okx_spot",
+            ws_url="wss://ws.okx.com:8443/ws/v5/public",
+            subscribe_fn=_static_sub({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT"}]}),
+            parse_fn=lambda msg: _parse_okx("okx_spot", msg),
+            app_ping_msg="ping",
+            app_ping_interval=25,
+        ),
+        # ---- OKX futures (BTC-USDT-SWAP) ----
+        # sz in contracts, 1 contract = 0.01 BTC
+        WsRunner(
+            exchange="okx_futures",
+            ws_url="wss://ws.okx.com:8443/ws/v5/public",
+            subscribe_fn=_static_sub({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT-SWAP"}]}),
+            parse_fn=lambda msg: _parse_okx("okx_futures", msg),
+            app_ping_msg="ping",
+            app_ping_interval=25,
+        ),
+        # ---- Gate spot ----
+        # amount in BTC. Gate uses WS-level ping frames — no app heartbeat needed
+        WsRunner(
+            exchange="gate_spot",
+            ws_url="wss://api.gateio.ws/ws/v4/",
+            subscribe_fn=_gate_sub("spot.trades", ["BTC_USDT"]),
+            parse_fn=_parse_gate_spot,
+            app_ping_msg=None,
+        ),
+        # ---- Gate futures (BTC_USDT USDT-margined perp) ----
+        # size positive=buy, negative=sell; 1 contract = 1 USD → /price = BTC
+        WsRunner(
+            exchange="gate_futures",
+            ws_url="wss://fx-ws.gateio.ws/v4/ws/usdt",
+            subscribe_fn=_gate_sub("futures.trades", ["BTC_USDT"]),
+            parse_fn=_parse_gate_futures,
+            app_ping_msg=None,
+        ),
+        # ---- MEXC spot ----
+        # v in BTC. S: 1=buy, 2=sell. Uses WS-level frames — no app heartbeat needed
+        WsRunner(
+            exchange="mexc_spot",
+            ws_url="wss://wbs.mexc.com/ws",
+            subscribe_fn=_static_sub({"method": "SUBSCRIPTION", "params": ["spot@public.deals.v3.api@BTCUSDT"]}),
+            parse_fn=_parse_mexc_spot,
+            app_ping_msg=None,
+        ),
+        # ---- MEXC futures (BTC_USDT) ----
+        # v in contracts, 1 contract = 1 USDT → /price = BTC. T: 1=buy, 2=sell
+        # MEXC contract WS requires JSON ping every ≤15s
+        WsRunner(
+            exchange="mexc_futures",
+            ws_url="wss://contract.mexc.com/edge",
+            subscribe_fn=_static_sub({"method": "sub.deal", "param": {"symbol": "BTC_USDT"}}),
+            parse_fn=_parse_mexc_futures,
+            app_ping_msg=json.dumps({"method": "ping"}),
+            app_ping_interval=15,
+        ),
+        # ---- Coinbase Exchange ----
+        # matches channel: side is the taker side ('buy' = taker buy)
+        WsRunner(
+            exchange="coinbase",
+            ws_url="wss://ws-feed.exchange.coinbase.com",
+            subscribe_fn=_static_sub({"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["matches"]}),
+            parse_fn=_parse_coinbase,
+            app_ping_msg=None,
+        ),
+        # ---- Kraken V2 ----
+        # qty in BTC. side: 'buy'/'sell' is taker side. Kraken sends heartbeats — no app ping needed
+        WsRunner(
+            exchange="kraken",
+            ws_url="wss://ws.kraken.com/v2",
+            subscribe_fn=_static_sub({"method": "subscribe", "params": {"channel": "trade", "symbol": ["BTC/USD"]}}),
+            parse_fn=_parse_kraken,
+            app_ping_msg=None,
+        ),
+    ]
+
+
+def _health_monitor(runners: List[WsRunner]) -> None:
+    """
+    Background thread: checks each WsRunner every 60s.
+    Forces reconnect by closing the socket if no trades received for WS_STALE_S.
+    This handles the case where the TCP connection is alive but the exchange
+    stopped sending data (e.g. dropped subscription without closing the socket).
+    """
+    while True:
+        time.sleep(60)
+        now = time.time()
+        for runner in runners:
+            if not runner._connected:
+                continue
+            if runner.last_trade_ts > 0 and now - runner.last_trade_ts > runner.WS_STALE_S:
+                log.warning(
+                    f"[{runner.exchange}] No trades for "
+                    f"{now - runner.last_trade_ts:.0f}s — forcing reconnect"
+                )
+                try:
+                    runner.ws.close()
+                except Exception:
+                    pass
+
+
+def start_websockets() -> None:
+    """Start all WebSocket streams and the health monitor."""
+    runners = _build_ws_runners()
+    for runner in runners:
+        runner.start()
+        time.sleep(0.2)  # stagger connections slightly
+    threading.Thread(
+        target=_health_monitor, args=(runners,),
+        daemon=True, name="ws-health",
+    ).start()
+    log.info(f"[ws] Started {len(runners)} WebSocket streams + health monitor")
 
 
 # ---------------------------------------------------------------------------
@@ -608,45 +1131,32 @@ def update_oi_binance() -> None:
 # COLLECTION CYCLE
 # ---------------------------------------------------------------------------
 
-# Maps exchange name → (fetcher_function, market_type_string)
-TRADES_EXCHANGES = {
-    "mexc_spot":     (fetch_trades_mexc_spot,                                 "spot"),
-    "bybit_spot":    (lambda: fetch_trades_bybit(category="spot"),           "spot"),
-    "okx_spot":      (lambda: fetch_trades_okx(inst_id="BTC-USDT"),          "spot"),
-    "gate_spot":     (fetch_trades_gate_spot,                                 "spot"),
-    "coinbase":      (fetch_trades_coinbase,                                  "spot"),
-    "kraken":        (fetch_trades_kraken,                                    "spot"),
-    "bybit_futures": (lambda: fetch_trades_bybit(category="linear"),          "futures"),
-    "okx_futures":   (lambda: fetch_trades_okx(inst_id="BTC-USDT-SWAP"),     "futures"),
-    "gate_futures":  (fetch_trades_gate_futures,                              "futures"),
-    "mexc_futures":  (fetch_trades_mexc_futures,                              "futures"),
-}
-
-
 def collect_cycle() -> None:
-    """One full data collection cycle (runs every UPDATE_INTERVAL_S seconds)."""
+    """
+    One full data collection cycle (runs every UPDATE_INTERVAL_S seconds).
+    Binance klines are fetched via REST. All other exchanges feed through
+    WebSocket streams — this cycle only flushes their accumulated buffers.
+    """
 
-    # 1. Native klines (spot)
+    # 1. Native klines (Binance spot)
     for exchange in ["binance"]:
         try:
             update_spot_native(exchange)
         except Exception as e:
             log.error(f"[{exchange}] spot klines error: {e}")
 
-    # 2. Native klines (futures)
+    # 2. Native klines (Binance futures)
     try:
         update_futures_binance()
     except Exception as e:
         log.error(f"[binance_futures] klines error: {e}")
 
-    # 3. Trades-based exchanges (spot + futures)
-    for exchange, (fetcher, market_type) in TRADES_EXCHANGES.items():
+    # 3. Flush WebSocket trade buffers to parquet
+    for exchange, market_type in _WS_EXCHANGE_MARKET.items():
         try:
-            new_trades = fetcher()
-            update_buffer(exchange, new_trades)
             flush_buffer_to_parquet(exchange, market_type)
         except Exception as e:
-            log.error(f"[{exchange}] trades error: {e}")
+            log.error(f"[{exchange}] flush error: {e}")
 
     # 4. OI snapshot
     update_oi_binance()
@@ -659,9 +1169,10 @@ def collect_cycle() -> None:
 def run_backfill() -> None:
     """
     One-time backfill on startup.
-    Native klines: full 5-day history.
-    Trades-based: only recent trades available (last ~1000 per exchange).
+    Native klines: full 5-day history (Binance spot + futures).
     OI: 5-day history via Binance 5m historical endpoint.
+    WS exchanges: seeded with REST snapshot (~last 1000 trades) to warm up
+    the buffer before WebSocket connections come online.
     """
     log.info("=" * 50)
     log.info("Starting backfill...")
@@ -684,16 +1195,15 @@ def run_backfill() -> None:
     except Exception as e:
         log.error(f"Backfill [binance_futures OI] failed: {e}")
 
-    # Initial trades fetch for trades-based exchanges
-    # (no historical data available — starts accumulating from now)
-    log.info("Fetching initial trades snapshot for trades-based exchanges...")
+    # Seed WS exchange buffers with recent REST snapshot
+    log.info("Seeding trade buffers with REST snapshot (WS warmup)...")
     for exchange, (fetcher, market_type) in TRADES_EXCHANGES.items():
         try:
             new_trades = fetcher()
             update_buffer(exchange, new_trades)
-            log.info(f"[{exchange}] initial trades: {len(new_trades)} rows")
+            log.info(f"[{exchange}] warmup: {len(new_trades)} trades")
         except Exception as e:
-            log.error(f"[{exchange}] initial trades failed: {e}")
+            log.error(f"[{exchange}] warmup failed: {e}")
         time.sleep(0.3)
 
     log.info("=" * 50)
@@ -716,7 +1226,7 @@ _SIGNAL_EMOJI = {
     "SELLING EXHAUSTION": "🔵",
     "SELLING ABSORPTION": "🟢",
     "BUYING EXHAUSTION":  "🟠",
-    "BUYING ABSORPTION":  "🔴" 
+    "BUYING ABSORPTION":  "🔴"
 }
 
 # All spot exchanges used for CVD aggregation (mirrors app.py default)
@@ -1052,12 +1562,16 @@ def check_and_alert(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def start() -> None:
-    """Backfill historical data, then run the collection loop indefinitely."""
+    """Backfill historical data, start WebSocket streams, then run the collection loop."""
     DATA_DIR.mkdir(exist_ok=True)
     run_backfill()
+    start_websockets()
 
     alert_state = _load_alert_state()
-    log.info(f"Collector running — update interval: {UPDATE_INTERVAL_S}s")
+    log.info(
+        f"Collector running — update interval: {UPDATE_INTERVAL_S}s, "
+        f"{len(_WS_EXCHANGE_MARKET)} WS streams active"
+    )
 
     while True:
         try:
