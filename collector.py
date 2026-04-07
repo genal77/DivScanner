@@ -728,7 +728,10 @@ def _parse_mexc_futures(msg: str) -> pd.DataFrame:
 def _parse_coinbase_adv(msg: str) -> pd.DataFrame:
     """
     Parse Coinbase Advanced Trade WebSocket market_trades message.
-    side: 'BUY' = taker buy, 'SELL' = taker sell.
+    IMPORTANT: Coinbase 'side' is the MAKER side, not the taker side.
+    side='SELL' means maker sold → taker BOUGHT → is_buyer=True (+delta)
+    side='BUY'  means maker bought → taker SOLD → is_buyer=False (-delta)
+    Source: docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket
     One message may contain multiple trades inside events[].trades[].
     Used as the sole Coinbase source (exchange='coinbase') — Advanced Trade has
     ~38x more activity than Exchange API and they share the same matching engine,
@@ -749,7 +752,7 @@ def _parse_coinbase_adv(msg: str) -> pd.DataFrame:
                 "timestamp": ts,
                 "price":     float(t["price"]),
                 "size":      float(t["size"]),
-                "is_buyer":  t["side"] == "BUY",
+                "is_buyer":  t["side"] == "SELL",  # SELL=maker sold=taker bought
             })
     return pd.DataFrame(rows)
 
