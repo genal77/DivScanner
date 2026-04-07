@@ -463,6 +463,7 @@ TRADES_EXCHANGES = {
     "okx_spot":      (lambda: fetch_trades_okx(inst_id="BTC-USDT"),           "spot"),
     "gate_spot":     (fetch_trades_gate_spot,                                  "spot"),
     "coinbase":      (fetch_trades_coinbase,                                   "spot"),
+    "coinbase_adv":  (fetch_trades_coinbase,                                   "spot"),
     "kraken":        (fetch_trades_kraken,                                     "spot"),
     "bybit_futures": (lambda: fetch_trades_bybit(category="linear"),           "futures"),
     "okx_futures":   (lambda: fetch_trades_okx(inst_id="BTC-USDT-SWAP"),      "futures"),
@@ -481,6 +482,7 @@ _trades_buffer: dict = {
     "okx_spot":       pd.DataFrame(),
     "gate_spot":      pd.DataFrame(),
     "coinbase":       pd.DataFrame(),
+    "coinbase_adv":   pd.DataFrame(),
     "kraken":         pd.DataFrame(),
     "bybit_futures":  pd.DataFrame(),
     "okx_futures":    pd.DataFrame(),
@@ -570,6 +572,7 @@ _WS_EXCHANGE_MARKET: dict = {
     "okx_spot":      "spot",
     "gate_spot":     "spot",
     "coinbase":      "spot",
+    "coinbase_adv":  "spot",
     "kraken":        "spot",
     "bybit_futures": "futures",
     "okx_futures":   "futures",
@@ -744,6 +747,32 @@ def _parse_coinbase(msg: str) -> pd.DataFrame:
         "size":      float(data["size"]),
         "is_buyer":  data["side"] == "buy",
     }])
+
+
+def _parse_coinbase_adv(msg: str) -> pd.DataFrame:
+    """
+    Parse Coinbase Advanced Trade WebSocket market_trades message.
+    side: 'BUY' = taker buy, 'SELL' = taker sell.
+    One message may contain multiple trades inside events[].trades[].
+    """
+    data = json.loads(msg)
+    if data.get("channel") != "market_trades":
+        return pd.DataFrame()
+    rows = []
+    for event in data.get("events", []):
+        for t in event.get("trades", []):
+            ts = pd.Timestamp(t["time"])
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            rows.append({
+                "timestamp": ts,
+                "price":     float(t["price"]),
+                "size":      float(t["size"]),
+                "is_buyer":  t["side"] == "BUY",
+            })
+    return pd.DataFrame(rows)
 
 
 def _parse_kraken(msg: str) -> pd.DataFrame:
@@ -1013,6 +1042,17 @@ def _build_ws_runners() -> List[WsRunner]:
             ws_url="wss://ws-feed.exchange.coinbase.com",
             subscribe_fn=_static_sub({"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["matches"]}),
             parse_fn=_parse_coinbase,
+            app_ping_msg=None,
+        ),
+        # ---- Coinbase Advanced Trade ----
+        # Separate feed with ~38x more activity than Exchange. Kept as distinct exchange
+        # to avoid double-counting trades that may appear on both feeds.
+        # side: 'BUY'/'SELL' is the taker side.
+        WsRunner(
+            exchange="coinbase_adv",
+            ws_url="wss://advanced-trade-ws.coinbase.com",
+            subscribe_fn=_static_sub({"type": "subscribe", "product_ids": ["BTC-USD"], "channel": "market_trades"}),
+            parse_fn=_parse_coinbase_adv,
             app_ping_msg=None,
         ),
         # ---- Kraken V2 ----
