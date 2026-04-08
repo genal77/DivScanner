@@ -10,22 +10,22 @@ Output files:
   data/btc_oi_1m.parquet       columns: timestamp, exchange, oi_value
 
 Spot exchanges:
-  Native taker buy (klines): binance
-  WebSocket trade stream:    bybit_spot, okx_spot, gate_spot, mexc_spot, coinbase, kraken
+  Native taker buy (klines):        binance
+  REST server-side aggregation:     okx_spot
+  REST polling (trade streams):     bybit_spot, gate_spot, coinbase, kraken
 
 Futures exchanges:
-  Native taker buy (klines): binance_futures
-  WebSocket trade stream:    bybit_futures, okx_futures, gate_futures, mexc_futures
+  Native taker buy (klines):        binance_futures
+  REST server-side aggregation:     okx_futures
+  REST polling (trade streams):     bybit_futures, gate_futures
 
 OI: binance_futures (polled every 60s, backfilled via 5m historical endpoint)
 
-WebSocket design:
-  - One persistent WsRunner thread per exchange (daemon)
-  - Automatic reconnect with exponential backoff (5s → 60s max)
-  - Application-level heartbeat for exchanges that require it (Bybit, OKX, MEXC futures)
-  - WebSocket-level ping frames (ping_interval=30s) for all connections
-  - Health monitor: forces reconnect if no trades received for WS_STALE_S seconds
-  - REST fetchers kept for initial warmup snapshot on startup
+Polling design:
+  - One PollingRunner thread per exchange (daemon)
+  - Calls fetch_fn every POLL_INTERVAL_S seconds
+  - fetch_fn is stateful (closure with last_ts / cursor)
+  - OKX uses server-side 5m candle aggregation (rubik/stat/taker-volume + market/candles)
 """
 
 import json
@@ -36,7 +36,6 @@ import logging
 
 import requests
 import pandas as pd
-import websocket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -259,237 +258,263 @@ def update_futures_binance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# REST TRADE FETCHERS — used only for initial warmup snapshot on startup
-# These seed the buffer before WebSocket connections come online.
+# OKX — REST SERVER-SIDE AGGREGATION
+# rubik/stat/taker-volume gives buy/sell BTC per 5m candle (server-computed).
+# market/candles gives OHLCV. Both are merged on timestamp (inner join).
 # ---------------------------------------------------------------------------
 
-def fetch_trades_mexc_spot() -> pd.DataFrame:
+def fetch_okx_with_taker(
+    exchange: str,
+    inst_id: str,
+    ccy: str,
+    inst_type: str,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """Fetch recent OKX candles with taker buy volume via server-side aggregation.
+
+    Uses rubik/stat/taker-volume (buy/sell BTC per 5m) merged with market/candles (OHLCV).
+    Inner join on timestamp — if either endpoint fails or has no overlap, returns empty DataFrame.
+    volume = buy_vol + sell_vol from rubik (already in BTC for both SPOT and CONTRACTS).
     """
-    Fetch recent BTC/USDT spot trades from MEXC.
-    MEXC klines return only 8 columns (no taker buy split), so trades are used instead.
-    isBuyerMaker=True means the buyer was the maker → the taker was a seller → NOT a taker buy.
+    try:
+        rubik_resp = requests.get(
+            "https://www.okx.com/api/v5/rubik/stat/taker-volume",
+            params={"ccy": ccy, "instType": inst_type, "period": "5m", "limit": limit},
+            timeout=10,
+        )
+        rubik_resp.raise_for_status()
+        rubik_data = rubik_resp.json()
+        if rubik_data.get("code") != "0" or not rubik_data.get("data"):
+            log.warning(f"[{exchange}] rubik error: {rubik_data.get('msg')}")
+            return pd.DataFrame()
+    except Exception as e:
+        log.warning(f"[{exchange}] rubik fetch failed: {e}")
+        return pd.DataFrame()
+
+    try:
+        candles_resp = requests.get(
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": inst_id, "bar": "5m", "limit": limit},
+            timeout=10,
+        )
+        candles_resp.raise_for_status()
+        candles_data = candles_resp.json()
+        if candles_data.get("code") != "0" or not candles_data.get("data"):
+            log.warning(f"[{exchange}] candles error: {candles_data.get('msg')}")
+            return pd.DataFrame()
+    except Exception as e:
+        log.warning(f"[{exchange}] candles fetch failed: {e}")
+        return pd.DataFrame()
+
+    # rubik: [[ts_ms, buy_vol, sell_vol], ...] newest first
+    rubik_rows = {}
+    for row in rubik_data["data"]:
+        ts_ms = int(row[0])
+        rubik_rows[ts_ms] = {
+            "taker_buy_vol": float(row[1]),
+            "taker_sell_vol": float(row[2]),
+        }
+
+    # candles: [[ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ...] newest first
+    candle_rows = {}
+    for row in candles_data["data"]:
+        ts_ms = int(row[0])
+        candle_rows[ts_ms] = {
+            "open":  float(row[1]),
+            "high":  float(row[2]),
+            "low":   float(row[3]),
+            "close": float(row[4]),
+        }
+
+    # inner join on common timestamps
+    common_ts = set(rubik_rows.keys()) & set(candle_rows.keys())
+    if not common_ts:
+        log.debug(f"[{exchange}] no overlapping timestamps between rubik and candles")
+        return pd.DataFrame()
+
+    records = []
+    for ts_ms in sorted(common_ts):
+        r = rubik_rows[ts_ms]
+        c = candle_rows[ts_ms]
+        records.append({
+            "timestamp":     pd.Timestamp(ts_ms, unit="ms", tz="UTC"),
+            "exchange":      exchange,
+            "open":          c["open"],
+            "high":          c["high"],
+            "low":           c["low"],
+            "close":         c["close"],
+            "volume":        r["taker_buy_vol"] + r["taker_sell_vol"],
+            "taker_buy_vol": r["taker_buy_vol"],
+        })
+
+    return pd.DataFrame(records)[
+        ["timestamp", "exchange", "open", "high", "low", "close", "volume", "taker_buy_vol"]
+    ]
+
+
+def backfill_okx(
+    exchange: str,
+    inst_id: str,
+    ccy: str,
+    inst_type: str,
+) -> None:
+    """Backfill OKX candles with taker volume from last_stored_ts to now.
+
+    Candles: page backwards using after=<oldest_ts> until reaching start_ms.
+    Rubik: fetch forward in chunks using begin/end parameters (100 candles = 8.3h per chunk).
+    Merges on common timestamps (inner join).
     """
-    url = "https://api.mexc.com/api/v3/trades"
-    params = {"symbol": "BTCUSDT", "limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    trades = resp.json()
-    if not trades:
-        return pd.DataFrame()
+    filepath = DATA_DIR / ("btc_spot_5m.parquet" if "spot" in exchange else "btc_futures_5m.parquet")
+    start_ms = last_stored_ts(filepath, exchange)
+    end_ms = now_ms()
 
-    df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="ms", utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size"] = df["qty"].astype(float)
-    df["is_buyer"] = ~df["isBuyerMaker"].astype(bool)  # taker buy = maker was NOT the buyer
-    return df[["timestamp", "price", "size", "is_buyer"]]
+    log.info(f"[{exchange}] Backfilling OKX from {ms_to_dt(start_ms).strftime('%Y-%m-%d %H:%M')}...")
 
+    # --- Fetch all candles paging backwards ---
+    candle_rows: dict = {}
+    after_ts = end_ms
+    while True:
+        try:
+            resp = requests.get(
+                "https://www.okx.com/api/v5/market/candles",
+                params={"instId": inst_id, "bar": "5m", "limit": 300, "after": after_ts},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            log.warning(f"[{exchange}] candles page failed: {e}")
+            break
 
-def fetch_trades_bybit(category: str = "spot", symbol: str = "BTCUSDT") -> pd.DataFrame:
-    """
-    Fetch recent trades from Bybit.
-    category: 'spot' or 'linear' (perpetual futures)
-    """
-    url = "https://api.bybit.com/v5/market/recent-trade"
-    params = {"category": category, "symbol": symbol, "limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+        if data.get("code") != "0" or not data.get("data"):
+            break
 
-    if data.get("retCode") != 0:
-        log.warning(f"Bybit trades error: {data.get('retMsg')}")
-        return pd.DataFrame()
+        batch = data["data"]
+        for row in batch:
+            ts_ms = int(row[0])
+            if ts_ms < start_ms:
+                continue
+            candle_rows[ts_ms] = {
+                "open":  float(row[1]),
+                "high":  float(row[2]),
+                "low":   float(row[3]),
+                "close": float(row[4]),
+            }
 
-    trades = data["result"]["list"]
-    if not trades:
-        return pd.DataFrame()
+        oldest_in_batch = int(batch[-1][0])
+        if oldest_in_batch <= start_ms or len(batch) < 300:
+            break
+        after_ts = oldest_in_batch
+        time.sleep(0.2)
 
-    df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="ms", utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size"] = df["size"].astype(float)
-    df["is_buyer"] = df["side"] == "Buy"
-    return df[["timestamp", "price", "size", "is_buyer"]]
+    if not candle_rows:
+        log.info(f"[{exchange}] No candles to backfill")
+        return
 
+    # --- Fetch rubik in forward chunks (100 candles = 500 min per chunk) ---
+    CHUNK_MS = 100 * INTERVAL_5M_MS  # 500 minutes in ms
+    rubik_rows: dict = {}
+    chunk_start = start_ms
+    while chunk_start < end_ms:
+        chunk_end = min(chunk_start + CHUNK_MS, end_ms)
+        try:
+            resp = requests.get(
+                "https://www.okx.com/api/v5/rubik/stat/taker-volume",
+                params={
+                    "ccy": ccy,
+                    "instType": inst_type,
+                    "period": "5m",
+                    "begin": chunk_start,
+                    "end": chunk_end,
+                    "limit": 100,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            log.warning(f"[{exchange}] rubik chunk failed: {e}")
+            chunk_start = chunk_end
+            continue
 
-def fetch_trades_okx(inst_id: str = "BTC-USDT") -> pd.DataFrame:
-    """
-    Fetch recent trades from OKX.
-    inst_id: 'BTC-USDT' for spot, 'BTC-USDT-SWAP' for perpetual futures.
+        if data.get("code") == "0" and data.get("data"):
+            for row in data["data"]:
+                ts_ms = int(row[0])
+                rubik_rows[ts_ms] = {
+                    "taker_buy_vol":  float(row[1]),
+                    "taker_sell_vol": float(row[2]),
+                }
 
-    Units:
-      Spot (BTC-USDT):      sz is in BTC — no conversion needed
-      Futures (SWAP):       sz is in contracts, 1 contract = 0.01 BTC — multiply by 0.01
-    """
-    url = "https://www.okx.com/api/v5/market/trades"
-    params = {"instId": inst_id, "limit": 500}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+        chunk_start = chunk_end
+        time.sleep(0.2)
 
-    if data.get("code") != "0":
-        log.warning(f"OKX trades error: {data.get('msg')}")
-        return pd.DataFrame()
+    # --- Inner join ---
+    common_ts = set(candle_rows.keys()) & set(rubik_rows.keys())
+    if not common_ts:
+        log.warning(f"[{exchange}] OKX backfill: no overlapping timestamps, skipping")
+        return
 
-    trades = data["data"]
-    if not trades:
-        return pd.DataFrame()
+    records = []
+    for ts_ms in sorted(common_ts):
+        r = rubik_rows[ts_ms]
+        c = candle_rows[ts_ms]
+        records.append({
+            "timestamp":     pd.Timestamp(ts_ms, unit="ms", tz="UTC"),
+            "exchange":      exchange,
+            "open":          c["open"],
+            "high":          c["high"],
+            "low":           c["low"],
+            "close":         c["close"],
+            "volume":        r["taker_buy_vol"] + r["taker_sell_vol"],
+            "taker_buy_vol": r["taker_buy_vol"],
+        })
 
-    df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["ts"].astype(float), unit="ms", utc=True)
-    df["price"] = df["px"].astype(float)
-    df["size"] = df["sz"].astype(float)
-
-    # Futures contracts → BTC
-    if "SWAP" in inst_id:
-        df["size"] = df["size"] * 0.01
-
-    df["is_buyer"] = df["side"] == "buy"
-    return df[["timestamp", "price", "size", "is_buyer"]]
-
-
-def fetch_trades_gate_spot() -> pd.DataFrame:
-    """Fetch recent spot trades from Gate.io."""
-    url = "https://api.gateio.ws/api/v4/spot/trades"
-    params = {"currency_pair": "BTC_USDT", "limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    trades = resp.json()
-    if not trades:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["create_time_ms"].astype(float), unit="ms", utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size"] = df["amount"].astype(float)
-    df["is_buyer"] = df["side"] == "buy"
-    return df[["timestamp", "price", "size", "is_buyer"]]
-
-
-def fetch_trades_gate_futures() -> pd.DataFrame:
-    """Fetch recent USDT perpetual futures trades from Gate.io."""
-    url = "https://api.gateio.ws/api/v4/futures/usdt/trades"
-    params = {"contract": "BTC_USDT", "limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    trades = resp.json()
-    if not trades:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(trades)
-    # Gate API returns create_time_ms as float seconds (not ms despite the name) — multiply by 1000
-    df["timestamp"] = pd.to_datetime(df["create_time"].astype(float) * 1000, unit="ms", utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size_raw"] = df["size"].astype(float)
-    # Gate futures: positive size = buy, negative size = sell (no separate 'side' field)
-    df["is_buyer"] = df["size_raw"] > 0
-    # Gate futures: size is in contracts, 1 contract = 1 USD → divide by price to get BTC
-    df["size"] = df["size_raw"].abs() / df["price"]
-    return df[["timestamp", "price", "size", "is_buyer"]]
+    result = pd.DataFrame(records)[
+        ["timestamp", "exchange", "open", "high", "low", "close", "volume", "taker_buy_vol"]
+    ]
+    upsert_parquet(filepath, result)
+    log.info(f"[{exchange}] OKX backfill done: {len(result)} candles")
 
 
-def fetch_trades_coinbase() -> pd.DataFrame:
-    """Fetch recent BTC-USD trades from Coinbase Exchange (public API)."""
-    url = "https://api.exchange.coinbase.com/products/BTC-USD/trades"
-    params = {"limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    trades = resp.json()
-    if not trades:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["time"], utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size"] = df["size"].astype(float)
-    # Coinbase side: "buy" means the aggressor was a buyer (taker buy)
-    df["is_buyer"] = df["side"] == "buy"
-    return df[["timestamp", "price", "size", "is_buyer"]]
-
-
-def fetch_trades_kraken() -> pd.DataFrame:
-    """Fetch recent BTC/USD trades from Kraken (last ~1000 trades)."""
-    url = "https://api.kraken.com/0/public/Trades"
-    params = {"pair": "XBTUSD"}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-
-    if data.get("error"):
-        log.warning(f"Kraken trades error: {data['error']}")
-        return pd.DataFrame()
-
-    result = data["result"]
-    pair_key = next((k for k in result if k != "last"), None)
-    if not pair_key:
-        return pd.DataFrame()
-
-    trades = result[pair_key]
-    if not trades:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(trades, columns=["price", "volume", "time", "side", "order_type", "misc", "trade_id"])
-    df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="s", utc=True)
-    df["price"] = df["price"].astype(float)
-    df["size"] = df["volume"].astype(float)
-    df["is_buyer"] = df["side"] == "b"
-    return df[["timestamp", "price", "size", "is_buyer"]]
-
-
-def fetch_trades_mexc_futures() -> pd.DataFrame:
-    """Fetch recent BTC_USDT perpetual futures trades from MEXC."""
-    url = "https://contract.mexc.com/api/v1/contract/deals/BTC_USDT"
-    params = {"limit": 1000}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-
-    if not data.get("data"):
-        return pd.DataFrame()
-
-    df = pd.DataFrame(data["data"])
-    df["timestamp"] = pd.to_datetime(df["t"].astype(float), unit="ms", utc=True)
-    df["price"] = df["p"].astype(float)
-    # MEXC futures: v is in contracts, 1 contract = 1 USDT → divide by price to get BTC
-    df["size"] = df["v"].astype(float) / df["price"]
-    df["is_buyer"] = df["T"] == 1  # T=1 buy, T=2 sell
-    return df[["timestamp", "price", "size", "is_buyer"]]
-
-
-# REST fetchers mapped to exchange name — used only for initial warmup
-TRADES_EXCHANGES = {
-    "mexc_spot":     (fetch_trades_mexc_spot,                                 "spot"),
-    "bybit_spot":    (lambda: fetch_trades_bybit(category="spot"),            "spot"),
-    "okx_spot":      (lambda: fetch_trades_okx(inst_id="BTC-USDT"),           "spot"),
-    "gate_spot":     (fetch_trades_gate_spot,                                  "spot"),
-    "coinbase":      (fetch_trades_coinbase,                                   "spot"),
-    "kraken":        (fetch_trades_kraken,                                     "spot"),
-    "bybit_futures": (lambda: fetch_trades_bybit(category="linear"),           "futures"),
-    "okx_futures":   (lambda: fetch_trades_okx(inst_id="BTC-USDT-SWAP"),      "futures"),
-    "gate_futures":  (fetch_trades_gate_futures,                               "futures"),
-    "mexc_futures":  (fetch_trades_mexc_futures,                               "futures"),
-}
+def update_okx(
+    exchange: str,
+    inst_id: str,
+    ccy: str,
+    inst_type: str,
+) -> None:
+    """Fetch latest OKX candles and upsert to parquet (called every 60s)."""
+    filepath = DATA_DIR / ("btc_spot_5m.parquet" if "spot" in exchange else "btc_futures_5m.parquet")
+    df = fetch_okx_with_taker(exchange, inst_id, ccy, inst_type, limit=10)
+    if not df.empty:
+        n = upsert_parquet(filepath, df)
+        log.info(f"[{exchange}] +{n} candles")
 
 
 # ---------------------------------------------------------------------------
-# TRADE BUFFER — thread-safe in-memory accumulator
+# TRADE BUFFER — thread-safe in-memory accumulator for polling exchanges
 # ---------------------------------------------------------------------------
 
 _trades_buffer: dict = {
-    "mexc_spot":      pd.DataFrame(),
     "bybit_spot":     pd.DataFrame(),
-    "okx_spot":       pd.DataFrame(),
     "gate_spot":      pd.DataFrame(),
     "coinbase":       pd.DataFrame(),
     "kraken":         pd.DataFrame(),
     "bybit_futures":  pd.DataFrame(),
-    "okx_futures":    pd.DataFrame(),
     "gate_futures":   pd.DataFrame(),
-    "mexc_futures":   pd.DataFrame(),
 }
 
-# One lock per exchange — protects concurrent access from WS threads vs flush thread
+# One lock per exchange — protects concurrent access from polling threads vs flush thread
 _buffer_locks: dict = {ex: threading.Lock() for ex in _trades_buffer}
+
+# Exchange → market type, used by collect_cycle for flushing polling buffers
+_POLLING_EXCHANGE_MARKET: dict = {
+    "bybit_spot":    "spot",
+    "gate_spot":     "spot",
+    "coinbase":      "spot",
+    "kraken":        "spot",
+    "bybit_futures": "futures",
+    "gate_futures":  "futures",
+}
 
 
 def update_buffer(exchange: str, new_trades: pd.DataFrame) -> None:
@@ -556,526 +581,241 @@ def flush_buffer_to_parquet(exchange: str, market_type: str) -> None:
     filepath = DATA_DIR / f"btc_{market_type}_5m.parquet"
     n = upsert_parquet(filepath, candles)
     if n:
-        log.info(f"[{exchange}] {market_type}: +{n} candles (ws)")
+        log.info(f"[{exchange}] {market_type}: +{n} candles (polling)")
 
 
 # ---------------------------------------------------------------------------
-# WEBSOCKET — real-time trade streams for all non-Binance exchanges
+# POLLING RUNNERS — stateful REST fetch factories + PollingRunner class
 # ---------------------------------------------------------------------------
 
-# Exchange → market type, used by collect_cycle for flushing
-_WS_EXCHANGE_MARKET: dict = {
-    "mexc_spot":     "spot",
-    "bybit_spot":    "spot",
-    "okx_spot":      "spot",
-    "gate_spot":     "spot",
-    "coinbase":      "spot",
-    "kraken":        "spot",
-    "bybit_futures": "futures",
-    "okx_futures":   "futures",
-    "gate_futures":  "futures",
-    "mexc_futures":  "futures",
-}
+class PollingRunner:
+    """REST polling loop: calls fetch_fn every POLL_INTERVAL_S seconds,
+    adds results to trade buffer. fetch_fn is stateful (closure with last_ts/cursor)."""
 
+    POLL_INTERVAL_S = 10
 
-# ------------------------------------------------------------------
-# Per-exchange message parsers
-# Each returns a DataFrame with columns: timestamp, price, size, is_buyer
-# Returns empty DataFrame on any parse error or non-trade message.
-# ------------------------------------------------------------------
-
-def _parse_bybit(exchange: str, msg: str) -> pd.DataFrame:
-    """
-    Parse Bybit V5 publicTrade message.
-    Size (v) is in BTC for both spot and linear perpetual.
-    S: 'Buy' = taker buy, 'Sell' = taker sell.
-    """
-    data = json.loads(msg)
-    if data.get("op") == "pong" or "data" not in data:
-        return pd.DataFrame()
-    trades = data["data"]
-    if not trades:
-        return pd.DataFrame()
-    return pd.DataFrame([{
-        "timestamp": pd.Timestamp(int(t["T"]), unit="ms", tz="UTC"),
-        "price":     float(t["p"]),
-        "size":      float(t["v"]),
-        "is_buyer":  t["S"] == "Buy",
-    } for t in trades])
-
-
-def _parse_okx(exchange: str, msg: str) -> pd.DataFrame:
-    """
-    Parse OKX trades channel message.
-    Spot (BTC-USDT): sz in BTC.
-    Futures (BTC-USDT-SWAP): sz in contracts, 1 contract = 0.01 BTC.
-    """
-    if msg == "pong":
-        return pd.DataFrame()
-    data = json.loads(msg)
-    if data.get("event") in ("subscribe", "error") or "data" not in data:
-        return pd.DataFrame()
-    is_futures = (exchange == "okx_futures")
-    return pd.DataFrame([{
-        "timestamp": pd.Timestamp(int(t["ts"]), unit="ms", tz="UTC"),
-        "price":     float(t["px"]),
-        "size":      float(t["sz"]) * (0.01 if is_futures else 1.0),
-        "is_buyer":  t["side"] == "buy",
-    } for t in data["data"]])
-
-
-def _gate_ts(raw) -> pd.Timestamp:
-    """
-    Gate.io timestamp helper.
-    Gate REST returns create_time_ms as float seconds (bug). Gate WS may return
-    actual milliseconds. Handles both by checking magnitude.
-    """
-    val = float(raw)
-    if val < 1e12:          # looks like seconds — convert to ms
-        val *= 1000
-    return pd.Timestamp(int(val), unit="ms", tz="UTC")
-
-
-def _parse_gate_spot(msg: str) -> pd.DataFrame:
-    """
-    Parse Gate.io spot.trades WebSocket message.
-    amount is in BTC. side: 'buy' = taker buy.
-    """
-    data = json.loads(msg)
-    if data.get("event") != "update" or data.get("channel") != "spot.trades":
-        return pd.DataFrame()
-    r = data.get("result", {})
-    if not r:
-        return pd.DataFrame()
-    ts_raw = r.get("create_time_ms") or r.get("create_time", 0)
-    return pd.DataFrame([{
-        "timestamp": _gate_ts(ts_raw),
-        "price":     float(r["price"]),
-        "size":      float(r["amount"]),
-        "is_buyer":  r["side"] == "buy",
-    }])
-
-
-def _parse_gate_futures(msg: str) -> pd.DataFrame:
-    """
-    Parse Gate.io futures.trades WebSocket message.
-    size positive = buy, negative = sell.
-    1 contract = 1 USD → divide by price for BTC.
-    """
-    data = json.loads(msg)
-    if data.get("event") != "update" or data.get("channel") != "futures.trades":
-        return pd.DataFrame()
-    results = data.get("result", [])
-    if not results:
-        return pd.DataFrame()
-    rows = []
-    for t in results:
-        size_raw = float(t["size"])
-        price    = float(t["price"])
-        ts_raw   = t.get("create_time_ms") or t.get("create_time", 0)
-        rows.append({
-            "timestamp": _gate_ts(ts_raw),
-            "price":     price,
-            "size":      abs(size_raw) / price,
-            "is_buyer":  size_raw > 0,
-        })
-    return pd.DataFrame(rows)
-
-
-def _parse_mexc_spot(msg: str) -> pd.DataFrame:
-    """
-    Parse MEXC spot deals WebSocket message.
-    v is in BTC. S: 1 = taker buy, 2 = taker sell.
-    """
-    data = json.loads(msg)
-    deals = data.get("d", {}).get("deals", [])
-    if not deals:
-        return pd.DataFrame()
-    return pd.DataFrame([{
-        "timestamp": pd.Timestamp(int(t["t"]), unit="ms", tz="UTC"),
-        "price":     float(t["p"]),
-        "size":      float(t["v"]),
-        "is_buyer":  int(t["S"]) == 1,
-    } for t in deals])
-
-
-def _parse_mexc_futures(msg: str) -> pd.DataFrame:
-    """
-    Parse MEXC futures push.deal WebSocket message.
-    v in contracts, 1 contract = 1 USDT → divide by price for BTC.
-    T: 1 = buy, 2 = sell.
-    Message format: {"channel": "push.deal", "data": [{...}], "symbol": "BTC_USDT", "ts": ...}
-    Note: data is a list directly, not a dict with a "deals" key.
-    """
-    data = json.loads(msg)
-    if data.get("channel") != "push.deal":
-        return pd.DataFrame()
-    deals = data.get("data", [])
-    if not isinstance(deals, list) or not deals:
-        return pd.DataFrame()
-    rows = []
-    for t in deals:
-        price = float(t["p"])
-        rows.append({
-            "timestamp": pd.Timestamp(int(t["t"]), unit="ms", tz="UTC"),
-            "price":     price,
-            "size":      float(t["v"]) / price,
-            "is_buyer":  int(t["T"]) == 1,
-        })
-    return pd.DataFrame(rows)
-
-
-def _parse_coinbase_adv(msg: str) -> pd.DataFrame:
-    """
-    Parse Coinbase Advanced Trade WebSocket market_trades message.
-    IMPORTANT: Coinbase 'side' is the MAKER side, not the taker side.
-    side='SELL' means maker sold → taker BOUGHT → is_buyer=True (+delta)
-    side='BUY'  means maker bought → taker SOLD → is_buyer=False (-delta)
-    Source: docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket
-    One message may contain multiple trades inside events[].trades[].
-    Used as the sole Coinbase source (exchange='coinbase') — Advanced Trade has
-    ~38x more activity than Exchange API and they share the same matching engine,
-    so collecting both would double-count every trade.
-    """
-    data = json.loads(msg)
-    if data.get("channel") != "market_trades":
-        return pd.DataFrame()
-    rows = []
-    for event in data.get("events", []):
-        for t in event.get("trades", []):
-            ts = pd.Timestamp(t["time"])
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            else:
-                ts = ts.tz_convert("UTC")
-            rows.append({
-                "timestamp": ts,
-                "price":     float(t["price"]),
-                "size":      float(t["size"]),
-                "is_buyer":  t["side"] == "SELL",  # SELL=maker sold=taker bought
-            })
-    return pd.DataFrame(rows)
-
-
-def _parse_kraken(msg: str) -> pd.DataFrame:
-    """
-    Parse Kraken V2 trade channel message.
-    side: 'buy' = taker buy.
-    """
-    data = json.loads(msg)
-    if data.get("channel") != "trade" or data.get("type") not in ("update", "snapshot"):
-        return pd.DataFrame()
-    trades = data.get("data", [])
-    if not trades:
-        return pd.DataFrame()
-    rows = []
-    for t in trades:
-        ts = pd.Timestamp(t["timestamp"])
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        else:
-            ts = ts.tz_convert("UTC")
-        rows.append({
-            "timestamp": ts,
-            "price":     float(t["price"]),
-            "size":      float(t["qty"]),
-            "is_buyer":  t["side"] == "buy",
-        })
-    return pd.DataFrame(rows)
-
-
-# ------------------------------------------------------------------
-# WsRunner — manages one WebSocket connection with full error handling
-# ------------------------------------------------------------------
-
-class WsRunner:
-    """
-    Manages a single persistent WebSocket connection for a trade stream.
-
-    Reconnect logic:
-      - Exponential backoff: 5s → 10s → 20s → 40s → 60s (max)
-      - Backoff resets on every successful connect (on_open)
-      - WebSocket-level ping frames (ping_interval=30s, ping_timeout=10s) detect
-        dead TCP connections even when the server is silent
-
-    Heartbeat (application-level ping):
-      - Some exchanges disconnect after ~30s of client inactivity (Bybit, OKX, MEXC)
-      - app_ping_msg is sent in a dedicated daemon thread at app_ping_interval seconds
-      - Thread exits automatically when connection closes
-
-    Stale detection:
-      - last_trade_ts tracks when the last trade arrived
-      - _health_monitor (external) calls ws.close() if stale > WS_STALE_S
-        to force a reconnect even when the TCP connection looks alive
-    """
-
-    WS_STALE_S = 300  # seconds without a trade before forcing reconnect
-
-    def __init__(
-        self,
-        exchange: str,
-        ws_url: str,
-        subscribe_fn: Callable[[], str],    # called on every connect, returns JSON to send
-        parse_fn: Callable[[str], pd.DataFrame],
-        app_ping_msg: Optional[str] = None,  # JSON string sent as heartbeat, or None
-        app_ping_interval: int = 20,         # seconds between heartbeats
-    ) -> None:
-        self.exchange          = exchange
-        self.ws_url            = ws_url
-        self.subscribe_fn      = subscribe_fn
-        self.parse_fn          = parse_fn
-        self.app_ping_msg      = app_ping_msg
-        self.app_ping_interval = app_ping_interval
-        self.ws: Optional[websocket.WebSocketApp] = None
-        self._connected        = False
-        self._reconnect_delay  = 5
-        self.last_trade_ts     = 0.0   # time.time() of last parsed trade
-
-    # ------------------------------------------------------------------
-    # WebSocketApp callbacks
-    # ------------------------------------------------------------------
-
-    def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        log.info(f"[{self.exchange}] WS connected")
-        self._connected = True
-        self._reconnect_delay = 5       # reset backoff on successful connect
-        ws.send(self.subscribe_fn())
-        if self.app_ping_msg:
-            threading.Thread(
-                target=self._ping_loop, daemon=True,
-                name=f"ws-ping-{self.exchange}",
-            ).start()
-
-    def _on_message(self, ws: websocket.WebSocketApp, msg: str) -> None:
-        try:
-            trades = self.parse_fn(msg)
-            if not trades.empty:
-                self.last_trade_ts = time.time()
-                update_buffer(self.exchange, trades)
-        except Exception as e:
-            log.debug(f"[{self.exchange}] parse error: {e}")
-
-    def _on_error(self, ws: websocket.WebSocketApp, error: Exception) -> None:
-        log.warning(f"[{self.exchange}] WS error: {error}")
-
-    def _on_close(
-        self,
-        ws: websocket.WebSocketApp,
-        close_status_code: Optional[int],
-        close_msg: Optional[str],
-    ) -> None:
-        self._connected = False
-        log.info(f"[{self.exchange}] WS closed (code={close_status_code})")
-
-    # ------------------------------------------------------------------
-    # Application-level ping loop
-    # ------------------------------------------------------------------
-
-    def _ping_loop(self) -> None:
-        """Send application-level heartbeat while connected."""
-        while self._connected:
-            time.sleep(self.app_ping_interval)
-            if self._connected and self.ws:
-                try:
-                    self.ws.send(self.app_ping_msg)
-                except Exception as e:
-                    log.debug(f"[{self.exchange}] heartbeat error: {e}")
-
-    # ------------------------------------------------------------------
-    # Reconnect loop — runs for the lifetime of the daemon thread
-    # ------------------------------------------------------------------
-
-    def _run_with_reconnect(self) -> None:
-        while True:
-            try:
-                log.info(f"[{self.exchange}] Connecting...")
-                self.ws = websocket.WebSocketApp(
-                    self.ws_url,
-                    on_open=self._on_open,
-                    on_message=self._on_message,
-                    on_error=self._on_error,
-                    on_close=self._on_close,
-                )
-                # ping_interval sends WebSocket-level ping frames to detect dead connections
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
-            except Exception as e:
-                log.error(f"[{self.exchange}] WS run exception: {e}")
-            finally:
-                self._connected = False
-
-            log.info(f"[{self.exchange}] Reconnecting in {self._reconnect_delay}s...")
-            time.sleep(self._reconnect_delay)
-            self._reconnect_delay = min(self._reconnect_delay * 2, 60)
+    def __init__(self, exchange: str, fetch_fn: Callable[[], pd.DataFrame]) -> None:
+        """
+        Args:
+            exchange: exchange key matching _trades_buffer
+            fetch_fn: stateful callable — returns new trades since last call
+        """
+        self.exchange = exchange
+        self.fetch_fn = fetch_fn
 
     def start(self) -> None:
-        """Start the WebSocket connection in a daemon thread."""
+        """Start polling in a daemon thread."""
         threading.Thread(
-            target=self._run_with_reconnect, daemon=True,
-            name=f"ws-{self.exchange}",
+            target=self._run, daemon=True,
+            name=f"poll-{self.exchange}",
         ).start()
 
-
-# ------------------------------------------------------------------
-# WS runner factory
-# ------------------------------------------------------------------
-
-def _static_sub(payload: dict) -> Callable[[], str]:
-    """Subscribe factory for static payloads (no dynamic fields)."""
-    s = json.dumps(payload)
-    return lambda: s
-
-
-def _gate_sub(channel: str, payload: list) -> Callable[[], str]:
-    """Subscribe factory for Gate.io (requires fresh Unix timestamp on each connect)."""
-    return lambda: json.dumps({
-        "time":    int(time.time()),
-        "channel": channel,
-        "event":   "subscribe",
-        "payload": payload,
-    })
+    def _run(self) -> None:
+        """Main poll loop."""
+        while True:
+            try:
+                new_trades = self.fetch_fn()
+                if not new_trades.empty:
+                    update_buffer(self.exchange, new_trades)
+            except Exception as e:
+                log.warning(f"[{self.exchange}] poll error: {e}")
+            time.sleep(self.POLL_INTERVAL_S)
 
 
-def _build_ws_runners() -> List[WsRunner]:
-    """Instantiate one WsRunner per non-Binance exchange."""
-    return [
-        # ---- Bybit spot ----
-        # publicTrade.BTCUSDT: size (v) in BTC, S: 'Buy'/'Sell' is taker side
-        # Bybit disconnects after 30s of inactivity → heartbeat every 20s
-        WsRunner(
-            exchange="bybit_spot",
-            ws_url="wss://stream.bybit.com/v5/public/spot",
-            subscribe_fn=_static_sub({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}),
-            parse_fn=lambda msg: _parse_bybit("bybit_spot", msg),
-            app_ping_msg=json.dumps({"op": "ping"}),
-            app_ping_interval=20,
-        ),
-        # ---- Bybit futures (linear perpetual) ----
-        # Same format as spot; size (v) is in BTC for linear BTCUSDT
-        WsRunner(
-            exchange="bybit_futures",
-            ws_url="wss://stream.bybit.com/v5/public/linear",
-            subscribe_fn=_static_sub({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}),
-            parse_fn=lambda msg: _parse_bybit("bybit_futures", msg),
-            app_ping_msg=json.dumps({"op": "ping"}),
-            app_ping_interval=20,
-        ),
-        # ---- OKX spot ----
-        # sz in BTC. OKX expects string "ping" every ≤30s or it disconnects
-        WsRunner(
-            exchange="okx_spot",
-            ws_url="wss://ws.okx.com:8443/ws/v5/public",
-            subscribe_fn=_static_sub({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT"}]}),
-            parse_fn=lambda msg: _parse_okx("okx_spot", msg),
-            app_ping_msg="ping",
-            app_ping_interval=25,
-        ),
-        # ---- OKX futures (BTC-USDT-SWAP) ----
-        # sz in contracts, 1 contract = 0.01 BTC
-        WsRunner(
-            exchange="okx_futures",
-            ws_url="wss://ws.okx.com:8443/ws/v5/public",
-            subscribe_fn=_static_sub({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT-SWAP"}]}),
-            parse_fn=lambda msg: _parse_okx("okx_futures", msg),
-            app_ping_msg="ping",
-            app_ping_interval=25,
-        ),
-        # ---- Gate spot ----
-        # amount in BTC. Gate uses WS-level ping frames — no app heartbeat needed
-        WsRunner(
-            exchange="gate_spot",
-            ws_url="wss://api.gateio.ws/ws/v4/",
-            subscribe_fn=_gate_sub("spot.trades", ["BTC_USDT"]),
-            parse_fn=_parse_gate_spot,
-            app_ping_msg=None,
-        ),
-        # ---- Gate futures (BTC_USDT USDT-margined perp) ----
-        # size positive=buy, negative=sell; 1 contract = 1 USD → /price = BTC
-        WsRunner(
-            exchange="gate_futures",
-            ws_url="wss://fx-ws.gateio.ws/v4/ws/usdt",
-            subscribe_fn=_gate_sub("futures.trades", ["BTC_USDT"]),
-            parse_fn=_parse_gate_futures,
-            app_ping_msg=None,
-        ),
-        # ---- MEXC spot ----
-        # v in BTC. S: 1=buy, 2=sell. Uses WS-level frames — no app heartbeat needed
-        WsRunner(
-            exchange="mexc_spot",
-            ws_url="wss://wbs.mexc.com/ws",
-            subscribe_fn=_static_sub({"method": "SUBSCRIPTION", "params": ["spot@public.deals.v3.api@BTCUSDT"]}),
-            parse_fn=_parse_mexc_spot,
-            app_ping_msg=None,
-        ),
-        # ---- MEXC futures (BTC_USDT) ----
-        # v in contracts, 1 contract = 1 USDT → /price = BTC. T: 1=buy, 2=sell
-        # MEXC contract WS requires JSON ping every ≤15s
-        WsRunner(
-            exchange="mexc_futures",
-            ws_url="wss://contract.mexc.com/edge",
-            subscribe_fn=_static_sub({"method": "sub.deal", "param": {"symbol": "BTC_USDT"}}),
-            parse_fn=_parse_mexc_futures,
-            app_ping_msg=json.dumps({"method": "ping"}),
-            app_ping_interval=15,
-        ),
-        # ---- Coinbase Advanced Trade ----
-        # Sole Coinbase source. Advanced Trade and Exchange API share the same matching
-        # engine (identical trade_ids confirmed) — using both would double-count every trade.
-        # Advanced Trade has ~38x more activity (complete feed); Exchange API is a subset.
-        # side: 'BUY'/'SELL' is the taker side.
-        WsRunner(
-            exchange="coinbase",
-            ws_url="wss://advanced-trade-ws.coinbase.com",
-            subscribe_fn=_static_sub({"type": "subscribe", "product_ids": ["BTC-USD"], "channel": "market_trades"}),
-            parse_fn=_parse_coinbase_adv,
-            app_ping_msg=None,
-        ),
-        # ---- Kraken V2 ----
-        # qty in BTC. side: 'buy'/'sell' is taker side. Kraken sends heartbeats — no app ping needed
-        WsRunner(
-            exchange="kraken",
-            ws_url="wss://ws.kraken.com/v2",
-            subscribe_fn=_static_sub({"method": "subscribe", "params": {"channel": "trade", "symbol": ["BTC/USD"]}}),
-            parse_fn=_parse_kraken,
-            app_ping_msg=None,
-        ),
+def _make_bybit_fetcher(category: str) -> Callable[[], pd.DataFrame]:
+    """
+    Stateful fetch factory for Bybit spot (category='spot') or futures (category='linear').
+    side == 'Buy' is taker buy (taker side, verified).
+    """
+    state: dict = {"last_ts_ms": now_ms()}
+
+    def fetch() -> pd.DataFrame:
+        url = "https://api.bybit.com/v5/market/recent-trade"
+        params = {"category": category, "symbol": "BTCUSDT", "limit": 1000}
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("retCode") != 0:
+            log.warning(f"[bybit {category}] trades error: {data.get('retMsg')}")
+            return pd.DataFrame()
+        trades = data["result"]["list"]
+        if not trades:
+            return pd.DataFrame()
+        df = pd.DataFrame(trades)
+        df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="ms", utc=True)
+        df["price"]     = df["price"].astype(float)
+        df["size"]      = df["size"].astype(float)
+        df["is_buyer"]  = df["side"] == "Buy"
+        df = df[df["timestamp"] > pd.Timestamp(state["last_ts_ms"], unit="ms", tz="UTC")]
+        if df.empty:
+            return pd.DataFrame()
+        state["last_ts_ms"] = int(df["timestamp"].max().timestamp() * 1000)
+        return df[["timestamp", "price", "size", "is_buyer"]]
+
+    return fetch
+
+
+def _make_gate_spot_fetcher() -> Callable[[], pd.DataFrame]:
+    """
+    Stateful fetch factory for Gate.io spot.
+    REST side is TAKER side (same as WS): 'buy' = taker bought = is_buyer=True.
+    Verified empirically 2026-04-08: sell% tracks price direction correctly.
+    create_time_ms is float ms.
+    """
+    state: dict = {"last_unix_sec": int(datetime.now(timezone.utc).timestamp())}
+
+    def fetch() -> pd.DataFrame:
+        url = "https://api.gateio.ws/api/v4/spot/trades"
+        params = {
+            "currency_pair": "BTC_USDT",
+            "limit": 1000,
+            "from": state["last_unix_sec"],
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        trades = resp.json()
+        if not trades:
+            return pd.DataFrame()
+        df = pd.DataFrame(trades)
+        df["timestamp"] = pd.to_datetime(df["create_time_ms"].astype(float), unit="ms", utc=True)
+        df["price"]     = df["price"].astype(float)
+        df["size"]      = df["amount"].astype(float)
+        # taker side: 'buy' = taker bought
+        df["is_buyer"]  = df["side"] == "buy"
+        max_ts = df["timestamp"].max()
+        state["last_unix_sec"] = int(max_ts.timestamp())
+        return df[["timestamp", "price", "size", "is_buyer"]]
+
+    return fetch
+
+
+def _make_gate_futures_fetcher() -> Callable[[], pd.DataFrame]:
+    """
+    Stateful fetch factory for Gate.io USDT perpetual futures.
+    size > 0 = buy, size < 0 = sell (no 'side' field).
+    size in contracts, 1 contract = 1 USD → size_btc = abs(size) / price.
+    create_time is float seconds.
+    """
+    state: dict = {"last_unix_sec": int(datetime.now(timezone.utc).timestamp())}
+
+    def fetch() -> pd.DataFrame:
+        url = "https://api.gateio.ws/api/v4/futures/usdt/trades"
+        params = {
+            "contract": "BTC_USDT",
+            "limit": 1000,
+            "from": state["last_unix_sec"],
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        trades = resp.json()
+        if not trades:
+            return pd.DataFrame()
+        df = pd.DataFrame(trades)
+        df["timestamp"] = pd.to_datetime(df["create_time"].astype(float), unit="s", utc=True)
+        df["price"]     = df["price"].astype(float)
+        df["size_raw"]  = df["size"].astype(float)
+        df["is_buyer"]  = df["size_raw"] > 0
+        df["size"]      = df["size_raw"].abs() / df["price"]
+        max_ts = df["timestamp"].max()
+        state["last_unix_sec"] = int(max_ts.timestamp())
+        return df[["timestamp", "price", "size", "is_buyer"]]
+
+    return fetch
+
+
+def _make_kraken_fetcher() -> Callable[[], pd.DataFrame]:
+    """
+    Stateful fetch factory for Kraken.
+    since = last nonce from previous response (not a timestamp).
+    First poll: no since → last ~1000 trades.
+    side == 'b' is taker buy.
+    Rate limit: 15 req/min → polling at 10s = 6 req/min (safe).
+    """
+    state: dict = {"last_nonce": None}
+
+    def fetch() -> pd.DataFrame:
+        url = "https://api.kraken.com/0/public/Trades"
+        params: dict = {"pair": "XBTUSD"}
+        if state["last_nonce"] is not None:
+            params["since"] = state["last_nonce"]
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            log.warning(f"[kraken] trades error: {data['error']}")
+            return pd.DataFrame()
+        result = data["result"]
+        # update nonce for next call
+        state["last_nonce"] = result.get("last")
+        pair_key = next((k for k in result if k != "last"), None)
+        if not pair_key:
+            return pd.DataFrame()
+        trades = result[pair_key]
+        if not trades:
+            return pd.DataFrame()
+        df = pd.DataFrame(
+            trades,
+            columns=["price", "volume", "time", "side", "order_type", "misc", "trade_id"],
+        )
+        df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="s", utc=True)
+        df["price"]     = df["price"].astype(float)
+        df["size"]      = df["volume"].astype(float)
+        df["is_buyer"]  = df["side"] == "b"
+        return df[["timestamp", "price", "size", "is_buyer"]]
+
+    return fetch
+
+
+def _make_coinbase_fetcher() -> Callable[[], pd.DataFrame]:
+    """
+    Stateful fetch factory for Coinbase Exchange.
+    Pagination: before=<trade_id> returns trades with id > before (newer trades).
+    REST Exchange side: side == 'buy' = taker buy.
+    trade_id is integer.
+    """
+    state: dict = {"before": None}
+
+    def fetch() -> pd.DataFrame:
+        url = "https://api.exchange.coinbase.com/products/BTC-USD/trades"
+        params: dict = {"limit": 100}
+        if state["before"] is not None:
+            params["before"] = state["before"]
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        trades = resp.json()
+        if not trades:
+            return pd.DataFrame()
+        df = pd.DataFrame(trades)
+        df["timestamp"]  = pd.to_datetime(df["time"], utc=True)
+        df["price"]      = df["price"].astype(float)
+        df["size"]       = df["size"].astype(float)
+        df["is_buyer"]   = df["side"] == "buy"
+        df["trade_id"]   = df["trade_id"].astype(int)
+        max_id = int(df["trade_id"].max())
+        # On first poll just record the cursor; return empty to avoid double-counting
+        if state["before"] is None:
+            state["before"] = max_id
+            return pd.DataFrame()
+        state["before"] = max_id
+        return df[["timestamp", "price", "size", "is_buyer"]]
+
+    return fetch
+
+
+def start_polling_runners() -> None:
+    """Start REST polling runners for all trade-based exchanges."""
+    runners: List[PollingRunner] = [
+        PollingRunner("bybit_spot",    _make_bybit_fetcher("spot")),
+        PollingRunner("bybit_futures", _make_bybit_fetcher("linear")),
+        PollingRunner("gate_spot",     _make_gate_spot_fetcher()),
+        PollingRunner("gate_futures",  _make_gate_futures_fetcher()),
+        PollingRunner("kraken",        _make_kraken_fetcher()),
+        PollingRunner("coinbase",      _make_coinbase_fetcher()),
     ]
-
-
-def _health_monitor(runners: List[WsRunner]) -> None:
-    """
-    Background thread: checks each WsRunner every 60s.
-    Forces reconnect by closing the socket if no trades received for WS_STALE_S.
-    This handles the case where the TCP connection is alive but the exchange
-    stopped sending data (e.g. dropped subscription without closing the socket).
-    """
-    while True:
-        time.sleep(60)
-        now = time.time()
-        for runner in runners:
-            if not runner._connected:
-                continue
-            if runner.last_trade_ts > 0 and now - runner.last_trade_ts > runner.WS_STALE_S:
-                log.warning(
-                    f"[{runner.exchange}] No trades for "
-                    f"{now - runner.last_trade_ts:.0f}s — forcing reconnect"
-                )
-                try:
-                    runner.ws.close()
-                except Exception:
-                    pass
-
-
-def start_websockets() -> None:
-    """Start all WebSocket streams and the health monitor."""
-    runners = _build_ws_runners()
     for runner in runners:
         runner.start()
-        time.sleep(0.2)  # stagger connections slightly
-    threading.Thread(
-        target=_health_monitor, args=(runners,),
-        daemon=True, name="ws-health",
-    ).start()
-    log.info(f"[ws] Started {len(runners)} WebSocket streams + health monitor")
+        time.sleep(0.2)
+    log.info(f"[polling] Started {len(runners)} REST polling runners")
 
 
 # ---------------------------------------------------------------------------
@@ -1148,8 +888,9 @@ def update_oi_binance() -> None:
 def collect_cycle() -> None:
     """
     One full data collection cycle (runs every UPDATE_INTERVAL_S seconds).
-    Binance klines are fetched via REST. All other exchanges feed through
-    WebSocket streams — this cycle only flushes their accumulated buffers.
+    Binance klines and OKX candles are fetched via REST.
+    Polling exchanges (bybit/gate/coinbase/kraken) feed through PollingRunner threads —
+    this cycle only flushes their accumulated buffers.
     """
 
     # 1. Native klines (Binance spot)
@@ -1165,14 +906,26 @@ def collect_cycle() -> None:
     except Exception as e:
         log.error(f"[binance_futures] klines error: {e}")
 
-    # 3. Flush WebSocket trade buffers to parquet
-    for exchange, market_type in _WS_EXCHANGE_MARKET.items():
+    # 3. OKX spot (REST rubik + candles server-side aggregation)
+    try:
+        update_okx("okx_spot", "BTC-USDT", "BTC", "SPOT")
+    except Exception as e:
+        log.error(f"[okx_spot] update error: {e}")
+
+    # 4. OKX futures (REST rubik + candles server-side aggregation)
+    try:
+        update_okx("okx_futures", "BTC-USDT-SWAP", "BTC", "CONTRACTS")
+    except Exception as e:
+        log.error(f"[okx_futures] update error: {e}")
+
+    # 5. Flush polling trade buffers to parquet
+    for exchange, market_type in _POLLING_EXCHANGE_MARKET.items():
         try:
             flush_buffer_to_parquet(exchange, market_type)
         except Exception as e:
             log.error(f"[{exchange}] flush error: {e}")
 
-    # 4. OI snapshot
+    # 6. OI snapshot
     update_oi_binance()
 
 
@@ -1185,8 +938,8 @@ def run_backfill() -> None:
     One-time backfill on startup.
     Native klines: full 5-day history (Binance spot + futures).
     OI: 5-day history via Binance 5m historical endpoint.
-    WS exchanges: seeded with REST snapshot (~last 1000 trades) to warm up
-    the buffer before WebSocket connections come online.
+    OKX: 5-day history via server-side aggregation (rubik + candles).
+    Polling exchanges: no backfill — they start collecting from now.
     """
     log.info("=" * 50)
     log.info("Starting backfill...")
@@ -1209,16 +962,17 @@ def run_backfill() -> None:
     except Exception as e:
         log.error(f"Backfill [binance_futures OI] failed: {e}")
 
-    # Seed WS exchange buffers with recent REST snapshot
-    log.info("Seeding trade buffers with REST snapshot (WS warmup)...")
-    for exchange, (fetcher, market_type) in TRADES_EXCHANGES.items():
-        try:
-            new_trades = fetcher()
-            update_buffer(exchange, new_trades)
-            log.info(f"[{exchange}] warmup: {len(new_trades)} trades")
-        except Exception as e:
-            log.error(f"[{exchange}] warmup failed: {e}")
-        time.sleep(0.3)
+    # OKX server-side aggregation backfill
+    try:
+        backfill_okx("okx_spot", "BTC-USDT", "BTC", "SPOT")
+    except Exception as e:
+        log.error(f"Backfill [okx_spot] failed: {e}")
+    time.sleep(0.5)
+
+    try:
+        backfill_okx("okx_futures", "BTC-USDT-SWAP", "BTC", "CONTRACTS")
+    except Exception as e:
+        log.error(f"Backfill [okx_futures] failed: {e}")
 
     log.info("=" * 50)
     log.info("Backfill complete.")
@@ -1245,7 +999,7 @@ _SIGNAL_EMOJI = {
 
 # All spot exchanges used for CVD aggregation (mirrors app.py default)
 _ALL_SPOT_EXCHANGES = [
-    "binance", "mexc", "bybit_spot", "okx_spot",
+    "binance", "bybit_spot", "okx_spot",
     "gate_spot", "coinbase", "kraken",
 ]
 
@@ -1576,15 +1330,15 @@ def check_and_alert(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def start() -> None:
-    """Backfill historical data, start WebSocket streams, then run the collection loop."""
+    """Backfill historical data, start REST polling runners, then run the collection loop."""
     DATA_DIR.mkdir(exist_ok=True)
     run_backfill()
-    start_websockets()
+    start_polling_runners()
 
     alert_state = _load_alert_state()
     log.info(
         f"Collector running — update interval: {UPDATE_INTERVAL_S}s, "
-        f"{len(_WS_EXCHANGE_MARKET)} WS streams active"
+        f"{len(_POLLING_EXCHANGE_MARKET)} polling streams active"
     )
 
     while True:
