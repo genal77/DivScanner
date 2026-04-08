@@ -12,14 +12,22 @@ Output files:
 Spot exchanges:
   Native taker buy (klines):        binance
   REST server-side aggregation:     okx_spot
-  REST polling (trade streams):     bybit_spot, gate_spot, coinbase, kraken
+  WebSocket trade stream:           bybit_spot
+  REST polling (trade streams):     gate_spot, coinbase, kraken
 
 Futures exchanges:
   Native taker buy (klines):        binance_futures
   REST server-side aggregation:     okx_futures
-  REST polling (trade streams):     bybit_futures, gate_futures
+  WebSocket trade stream:           bybit_futures
+  REST polling (trade streams):     gate_futures
 
 OI: binance_futures (polled every 60s, backfilled via 5m historical endpoint)
+
+Bybit design:
+  - WebSocket publicTrade.BTCUSDT stream (zero data loss vs REST 60-trade cap)
+  - Reconnects automatically on disconnect (5s delay)
+  - Heartbeat ping every 20s to keep connection alive
+  - Trades buffered identically to REST polling exchanges
 
 Polling design:
   - One PollingRunner thread per exchange (daemon)
@@ -35,6 +43,7 @@ import time
 import logging
 
 import requests
+import websocket
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -640,37 +649,79 @@ class PollingRunner:
             time.sleep(self.POLL_INTERVAL_S)
 
 
-def _make_bybit_fetcher(category: str) -> Callable[[], pd.DataFrame]:
+def _start_bybit_ws(exchange: str, category: str) -> None:
     """
-    Stateful fetch factory for Bybit spot (category='spot') or futures (category='linear').
-    side == 'Buy' is taker buy (taker side, verified).
+    Start a WebSocket trade stream for Bybit in a daemon thread.
+
+    Uses publicTrade.BTCUSDT stream which delivers every trade in real time
+    with taker side ('S': 'Buy'/'Sell'). No data loss — replaces the REST
+    recent-trade endpoint which is capped at 60 trades per call for spot.
+
+    Args:
+        exchange: buffer key ('bybit_spot' or 'bybit_futures')
+        category: Bybit WS channel type ('spot' or 'linear')
     """
-    state: dict = {"last_ts_ms": now_ms()}
+    _WS_URLS = {
+        "spot":   "wss://stream.bybit.com/v5/public/spot",
+        "linear": "wss://stream.bybit.com/v5/public/linear",
+    }
+    url = _WS_URLS[category]
+    subscribe_msg = json.dumps({"op": "subscribe", "args": [f"publicTrade.BTCUSDT"]})
 
-    def fetch() -> pd.DataFrame:
-        url = "https://api.bybit.com/v5/market/recent-trade"
-        params = {"category": category, "symbol": "BTCUSDT", "limit": 1000}
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("retCode") != 0:
-            log.warning(f"[bybit {category}] trades error: {data.get('retMsg')}")
-            return pd.DataFrame()
-        trades = data["result"]["list"]
-        if not trades:
-            return pd.DataFrame()
-        df = pd.DataFrame(trades)
-        df["timestamp"] = pd.to_datetime(df["time"].astype(float), unit="ms", utc=True)
-        df["price"]     = df["price"].astype(float)
-        df["size"]      = df["size"].astype(float)
-        df["is_buyer"]  = df["side"] == "Buy"
-        df = df[df["timestamp"] > pd.Timestamp(state["last_ts_ms"], unit="ms", tz="UTC")]
-        if df.empty:
-            return pd.DataFrame()
-        state["last_ts_ms"] = int(df["timestamp"].max().timestamp() * 1000)
-        return df[["timestamp", "price", "size", "is_buyer"]]
+    def on_open(ws: websocket.WebSocketApp) -> None:
+        log.info(f"[{exchange}] WebSocket connected")
+        ws.send(subscribe_msg)
 
-    return fetch
+        def _heartbeat() -> None:
+            while True:
+                time.sleep(20)
+                try:
+                    ws.send('{"op":"ping"}')
+                except Exception:
+                    break
+
+        threading.Thread(target=_heartbeat, daemon=True, name=f"ws-hb-{exchange}").start()
+
+    def on_message(ws: websocket.WebSocketApp, message: str) -> None:
+        try:
+            data = json.loads(message)
+            if not data.get("topic", "").startswith("publicTrade"):
+                return
+            trades = data.get("data", [])
+            if not trades:
+                return
+            df = pd.DataFrame(trades)
+            df["timestamp"] = pd.to_datetime(df["T"].astype(float), unit="ms", utc=True)
+            df["price"]     = df["p"].astype(float)
+            df["size"]      = df["v"].astype(float)
+            df["is_buyer"]  = df["S"] == "Buy"
+            update_buffer(exchange, df[["timestamp", "price", "size", "is_buyer"]])
+        except Exception as e:
+            log.warning(f"[{exchange}] WS message error: {e}")
+
+    def on_error(ws: websocket.WebSocketApp, error: Exception) -> None:
+        log.warning(f"[{exchange}] WS error: {error}")
+
+    def on_close(ws: websocket.WebSocketApp, close_status_code: int, close_msg: str) -> None:
+        log.info(f"[{exchange}] WS closed ({close_status_code})")
+
+    def _run() -> None:
+        while True:
+            try:
+                ws = websocket.WebSocketApp(
+                    url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                ws.run_forever()
+            except Exception as e:
+                log.warning(f"[{exchange}] WS run_forever error: {e}")
+            log.info(f"[{exchange}] WS reconnecting in 5s...")
+            time.sleep(5)
+
+    threading.Thread(target=_run, daemon=True, name=f"ws-{exchange}").start()
 
 
 def _make_gate_spot_fetcher() -> Callable[[], pd.DataFrame]:
@@ -820,11 +871,16 @@ def _make_coinbase_fetcher() -> Callable[[], pd.DataFrame]:
     return fetch
 
 
+def start_bybit_websockets() -> None:
+    """Start WebSocket trade streams for Bybit spot and futures."""
+    _start_bybit_ws("bybit_spot",    "spot")
+    _start_bybit_ws("bybit_futures", "linear")
+    log.info("[bybit] Started 2 WebSocket trade streams (publicTrade.BTCUSDT)")
+
+
 def start_polling_runners() -> None:
-    """Start REST polling runners for all trade-based exchanges."""
+    """Start REST polling runners for non-Bybit trade-based exchanges."""
     runners: List[PollingRunner] = [
-        PollingRunner("bybit_spot",    _make_bybit_fetcher("spot")),
-        PollingRunner("bybit_futures", _make_bybit_fetcher("linear")),
         PollingRunner("gate_spot",     _make_gate_spot_fetcher()),
         PollingRunner("gate_futures",  _make_gate_futures_fetcher()),
         PollingRunner("kraken",        _make_kraken_fetcher()),
@@ -1351,6 +1407,7 @@ def start() -> None:
     """Backfill historical data, start REST polling runners, then run the collection loop."""
     DATA_DIR.mkdir(exist_ok=True)
     run_backfill()
+    start_bybit_websockets()
     start_polling_runners()
 
     alert_state = _load_alert_state()
