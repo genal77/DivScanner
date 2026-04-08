@@ -332,10 +332,19 @@ def fetch_okx_with_taker(
         log.debug(f"[{exchange}] no overlapping timestamps between rubik and candles")
         return pd.DataFrame()
 
+    # OKX rubik: SPOT volumes are in BTC; CONTRACTS volumes are in USD — divide by close price.
+    is_contracts = (inst_type == "CONTRACTS")
+
     records = []
     for ts_ms in sorted(common_ts):
         r = rubik_rows[ts_ms]
         c = candle_rows[ts_ms]
+        if is_contracts:
+            buy_vol  = r["taker_buy_vol"]  / c["close"]
+            sell_vol = r["taker_sell_vol"] / c["close"]
+        else:
+            buy_vol  = r["taker_buy_vol"]
+            sell_vol = r["taker_sell_vol"]
         records.append({
             "timestamp":     pd.Timestamp(ts_ms, unit="ms", tz="UTC"),
             "exchange":      exchange,
@@ -343,8 +352,8 @@ def fetch_okx_with_taker(
             "high":          c["high"],
             "low":           c["low"],
             "close":         c["close"],
-            "volume":        r["taker_buy_vol"] + r["taker_sell_vol"],
-            "taker_buy_vol": r["taker_buy_vol"],
+            "volume":        buy_vol + sell_vol,
+            "taker_buy_vol": buy_vol,
         })
 
     return pd.DataFrame(records)[
@@ -454,10 +463,19 @@ def backfill_okx(
         log.warning(f"[{exchange}] OKX backfill: no overlapping timestamps, skipping")
         return
 
+    # OKX rubik: SPOT volumes are in BTC; CONTRACTS volumes are in USD — divide by close price.
+    is_contracts = (inst_type == "CONTRACTS")
+
     records = []
     for ts_ms in sorted(common_ts):
         r = rubik_rows[ts_ms]
         c = candle_rows[ts_ms]
+        if is_contracts:
+            buy_vol  = r["taker_buy_vol"]  / c["close"]
+            sell_vol = r["taker_sell_vol"] / c["close"]
+        else:
+            buy_vol  = r["taker_buy_vol"]
+            sell_vol = r["taker_sell_vol"]
         records.append({
             "timestamp":     pd.Timestamp(ts_ms, unit="ms", tz="UTC"),
             "exchange":      exchange,
@@ -465,8 +483,8 @@ def backfill_okx(
             "high":          c["high"],
             "low":           c["low"],
             "close":         c["close"],
-            "volume":        r["taker_buy_vol"] + r["taker_sell_vol"],
-            "taker_buy_vol": r["taker_buy_vol"],
+            "volume":        buy_vol + sell_vol,
+            "taker_buy_vol": buy_vol,
         })
 
     result = pd.DataFrame(records)[
