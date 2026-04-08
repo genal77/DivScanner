@@ -876,7 +876,7 @@ def _make_coinbase_fetcher() -> Callable[[], pd.DataFrame]:
         df["timestamp"]  = pd.to_datetime(df["time"], utc=True)
         df["price"]      = df["price"].astype(float)
         df["size"]       = df["size"].astype(float)
-        df["is_buyer"]   = df["side"] == "buy"
+        df["is_buyer"]   = df["side"] == "sell"  # Coinbase side = maker side; maker sell = taker buy
         df["trade_id"]   = df["trade_id"].astype(int)
         max_id = int(df["trade_id"].max())
         # On first poll just record the cursor; return empty to avoid double-counting
