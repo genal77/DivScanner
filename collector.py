@@ -649,6 +649,9 @@ class PollingRunner:
             time.sleep(self.POLL_INTERVAL_S)
 
 
+_BYBIT_WS_STALE_S = 60  # force reconnect if no trade message received for this long
+
+
 def _start_bybit_ws(exchange: str, category: str) -> None:
     """
     Start a WebSocket trade stream for Bybit in a daemon thread.
@@ -656,6 +659,10 @@ def _start_bybit_ws(exchange: str, category: str) -> None:
     Uses publicTrade.BTCUSDT stream which delivers every trade in real time
     with taker side ('S': 'Buy'/'Sell'). No data loss — replaces the REST
     recent-trade endpoint which is capped at 60 trades per call for spot.
+
+    Includes stale connection detection: if no trade message arrives for
+    _BYBIT_WS_STALE_S seconds the connection is closed and reconnected.
+    BTC/USDT always has trades every few seconds, so silence = stale.
 
     Args:
         exchange: buffer key ('bybit_spot' or 'bybit_futures')
@@ -668,21 +675,30 @@ def _start_bybit_ws(exchange: str, category: str) -> None:
     url = _WS_URLS[category]
     subscribe_msg = json.dumps({"op": "subscribe", "args": [f"publicTrade.BTCUSDT"]})
 
-    def on_open(ws: websocket.WebSocketApp) -> None:
+    def on_open(ws: websocket.WebSocketApp, last_trade_time: List[float]) -> None:
         log.info(f"[{exchange}] WebSocket connected")
         ws.send(subscribe_msg)
+        last_trade_time[0] = time.monotonic()
 
-        def _heartbeat() -> None:
+        def _heartbeat_and_stale_check() -> None:
             while True:
                 time.sleep(20)
                 try:
                     ws.send('{"op":"ping"}')
                 except Exception:
                     break
+                if time.monotonic() - last_trade_time[0] > _BYBIT_WS_STALE_S:
+                    log.warning(f"[{exchange}] WS stale — no trades for {_BYBIT_WS_STALE_S}s, reconnecting")
+                    ws.close()
+                    break
 
-        threading.Thread(target=_heartbeat, daemon=True, name=f"ws-hb-{exchange}").start()
+        threading.Thread(
+            target=_heartbeat_and_stale_check, daemon=True, name=f"ws-hb-{exchange}"
+        ).start()
 
-    def on_message(ws: websocket.WebSocketApp, message: str) -> None:
+    def on_message(
+        ws: websocket.WebSocketApp, message: str, last_trade_time: List[float]
+    ) -> None:
         try:
             data = json.loads(message)
             if not data.get("topic", "").startswith("publicTrade"):
@@ -690,6 +706,7 @@ def _start_bybit_ws(exchange: str, category: str) -> None:
             trades = data.get("data", [])
             if not trades:
                 return
+            last_trade_time[0] = time.monotonic()
             df = pd.DataFrame(trades)
             df["timestamp"] = pd.to_datetime(df["T"].astype(float), unit="ms", utc=True)
             df["price"]     = df["p"].astype(float)
@@ -707,11 +724,12 @@ def _start_bybit_ws(exchange: str, category: str) -> None:
 
     def _run() -> None:
         while True:
+            last_trade_time: List[float] = [time.monotonic()]
             try:
                 ws = websocket.WebSocketApp(
                     url,
-                    on_open=on_open,
-                    on_message=on_message,
+                    on_open=lambda w: on_open(w, last_trade_time),
+                    on_message=lambda w, m: on_message(w, m, last_trade_time),
                     on_error=on_error,
                     on_close=on_close,
                 )
