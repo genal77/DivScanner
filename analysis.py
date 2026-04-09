@@ -225,6 +225,49 @@ def _dedup_consecutive_pivots(indices: list, arr) -> list:
     return result
 
 
+def find_pivot_bt_candidates(
+    series: pd.Series,
+    pivot_a_idx: int,
+    lbt: int,
+    is_low: bool,
+) -> Tuple[List[int], List[int]]:
+    """
+    Find Pivot Bt candidates (temporary pivot B) since a confirmed Pivot A.
+
+    A candidate at index i requires:
+      - i >= pivot_a_idx + lbt + 1  (lbt bars of left context don't overlap Pivot A)
+      - series[i] is the local min/max over [i-lbt : i+1]  (LBt bars confirmed on left, no RB)
+
+    Returns (exhaustion_indices, absorption_indices):
+      - exhaustion: Bt more extreme than Pivot A (LL for lows, HH for highs)
+      - absorption: Bt less extreme than Pivot A (HL for lows, LH for highs)
+    """
+    arr = series.values
+    pivot_a_val = arr[pivot_a_idx]
+    exhaustion: List[int] = []
+    absorption: List[int] = []
+    start = pivot_a_idx + lbt + 1
+
+    for i in range(start, len(arr)):
+        left_window = arr[i - lbt: i + 1]
+        if is_low:
+            if arr[i] != left_window.min():
+                continue
+            if arr[i] < pivot_a_val:
+                exhaustion.append(i)
+            elif arr[i] > pivot_a_val:
+                absorption.append(i)
+        else:
+            if arr[i] != left_window.max():
+                continue
+            if arr[i] > pivot_a_val:
+                exhaustion.append(i)
+            elif arr[i] < pivot_a_val:
+                absorption.append(i)
+
+    return exhaustion, absorption
+
+
 def find_pivot_indices(
     series: pd.Series,
     window: int = PIVOT_WINDOW,
@@ -472,6 +515,7 @@ def build_figure(
     cvd_spot_mode:    str  = "candle",
     cvd_futures_mode: str  = "candle",
     oi_mode:          str  = "candle",
+    pivot_lbt:        int  = 3,
 ) -> Tuple[go.Figure, List[dict]]:
     """
     Assemble the 5-panel Plotly figure.
@@ -659,24 +703,11 @@ def build_figure(
                 draw_line(t0, merged["p_high"].iloc[p1],             t1, merged["p_high"].iloc[p2],             color, dash, 1.5, 1)
                 draw_line(t0, merged[cvd_hi_col].iloc[p1] + s,       t1, merged[cvd_hi_col].iloc[p2] + s,       color, dash, 1.5, 3)
 
-            # Live signal — current candle vs last confirmed pivot
+            # Pivot Bt — temporary pivot B candidates since last confirmed Pivot A
             low_data, high_data = detect_spot_signals(price_df, cvd_spot_df, cvd_mode=cvd_spot_mode)
             for data in (low_data, high_data):
                 if not data:
                     continue
-                color = "#2196f3" if "SELL" in data["signal"] else "orange"
-                dash  = "dash" if "EXHAUSTION" in data["signal"] else "solid"
-                is_low = "SELL" in data["signal"]
-                p_col  = "p_low"    if is_low else "p_high"
-                c_col  = cvd_lo_col if is_low else cvd_hi_col
-                sign   = -1         if is_low else +1
-                pivots = p_lows if is_low else p_highs
-                if pivots:
-                    last_p = pivots[-1]
-                    t0, t1 = merged["timestamp"].iloc[last_p], merged["timestamp"].iloc[curr]
-                    s = _shift(last_p, curr, c_col, sign)
-                    draw_line(t0, merged[p_col].iloc[last_p], t1, merged[p_col].iloc[curr], color, dash, 3, 1)
-                    draw_line(t0, merged[c_col].iloc[last_p] + sign * s, t1, merged[c_col].iloc[curr] + sign * s, color, dash, 3, 3)
                 atr_ratio = data.get("price_atr_ratio")
                 cvd_sigma = data.get("cvd_sigma")
                 score     = data.get("div_score")
@@ -684,8 +715,57 @@ def build_figure(
                 if atr_ratio is not None and cvd_sigma is not None:
                     score_str = f"  Δ{score*100:.0f}%" if score is not None else ""
                     metrics = f"  ·  {atr_ratio:.1f}×ATR  {cvd_sigma:.1f}σ{score_str}"
+                color = "#2196f3" if "SELL" in data["signal"] else "orange"
                 active_signals.append((color, f"{data['signal']}{metrics}"))
                 active_signal_data.append(data)
+
+            for is_low in (True, False):
+                pivots_a  = p_lows  if is_low else p_highs
+                if not pivots_a:
+                    continue
+                last_a    = pivots_a[-1]
+                p_col     = "p_low"    if is_low else "p_high"
+                cvd_col   = cvd_lo_col if is_low else cvd_hi_col
+                sign      = -1         if is_low else +1
+                base_color = "#2196f3" if is_low else "orange"
+                trail_color = "rgba(33,150,243,0.25)" if is_low else "rgba(255,165,0,0.25)"
+
+                bt_exhaustion, bt_absorption = find_pivot_bt_candidates(
+                    merged[p_col], last_a, pivot_lbt, is_low
+                )
+
+                # Filter by CVD direction and tag with dash style
+                all_bt: List[Tuple[int, str]] = []
+                for bt_idx in bt_exhaustion:
+                    cdif = merged[cvd_col].iloc[bt_idx] - merged[cvd_col].iloc[last_a]
+                    valid = (cdif > 0) if is_low else (cdif < 0)
+                    if valid:
+                        all_bt.append((bt_idx, "dash"))
+                for bt_idx in bt_absorption:
+                    cdif = merged[cvd_col].iloc[bt_idx] - merged[cvd_col].iloc[last_a]
+                    valid = (cdif < 0) if is_low else (cdif > 0)
+                    if valid:
+                        all_bt.append((bt_idx, "solid"))
+                all_bt.sort(key=lambda x: x[0])
+
+                if not all_bt:
+                    continue
+
+                # Trail: all previous Bt candidates (transparent, dotted)
+                for bt_idx, _ in all_bt[:-1]:
+                    t0 = merged["timestamp"].iloc[last_a]
+                    t1 = merged["timestamp"].iloc[bt_idx]
+                    s  = _shift(last_a, bt_idx, cvd_col, sign)
+                    draw_line(t0, merged[p_col].iloc[last_a],               t1, merged[p_col].iloc[bt_idx],               trail_color, "dot", 1, 1)
+                    draw_line(t0, merged[cvd_col].iloc[last_a] + sign * s,  t1, merged[cvd_col].iloc[bt_idx] + sign * s,  trail_color, "dot", 1, 3)
+
+                # Active: most recent Bt candidate (visible, dash or solid per type)
+                bt_idx, dash = all_bt[-1]
+                t0 = merged["timestamp"].iloc[last_a]
+                t1 = merged["timestamp"].iloc[bt_idx]
+                s  = _shift(last_a, bt_idx, cvd_col, sign)
+                draw_line(t0, merged[p_col].iloc[last_a],               t1, merged[p_col].iloc[bt_idx],               base_color, dash, 2.5, 1)
+                draw_line(t0, merged[cvd_col].iloc[last_a] + sign * s,  t1, merged[cvd_col].iloc[bt_idx] + sign * s,  base_color, dash, 2.5, 3)
 
         # CVD Futures divergences disabled — futures data still accumulating
 

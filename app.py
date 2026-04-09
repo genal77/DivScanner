@@ -340,7 +340,7 @@ app.layout = html.Div(
                                             ),
                                         ]),
                                         html.Div("RB", style={**_LABEL, "marginBottom": "4px"}),
-                                        html.Div(style={"width": "100%"}, children=[
+                                        html.Div(style={"width": "100%", "marginBottom": "14px"}, children=[
                                             dcc.Slider(
                                                 id="pivot-rb",
                                                 min=1, max=15, step=1, value=PIVOT_WINDOW,
@@ -349,6 +349,21 @@ app.layout = html.Div(
                                                     5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
                                                     15: {"label": "15", "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                },
+                                                tooltip={"placement": "top", "always_visible": False},
+                                                className="pivot-slider",
+                                            ),
+                                        ]),
+                                        html.Div("LBt", style={**_LABEL, "marginBottom": "4px"}),
+                                        html.Div(style={"width": "100%"}, children=[
+                                            dcc.Slider(
+                                                id="pivot-lbt",
+                                                min=1, max=10, step=1, value=3,
+                                                marks={
+                                                    1:  {"label": "1",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    3:  {"label": "3",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    5:  {"label": "5",  "style": {"color": _MUTED, "fontSize": "9px"}},
+                                                    10: {"label": "10", "style": {"color": _MUTED, "fontSize": "9px"}},
                                                 },
                                                 tooltip={"placement": "top", "always_visible": False},
                                                 className="pivot-slider",
@@ -523,12 +538,13 @@ def toggle_sidebar(n_clicks, current_label):
     Input("show-pivots", "value"),
     Input("pivot-lb", "value"),
     Input("pivot-rb", "value"),
+    Input("pivot-lbt", "value"),
     Input("cvd-spot-mode",    "value"),
     Input("cvd-futures-mode", "value"),
     Input("oi-mode",          "value"),
 )
 def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_val,
-                 pivot_lb, pivot_rb, cvd_spot_mode, cvd_futures_mode, oi_mode):
+                 pivot_lb, pivot_rb, pivot_lbt, cvd_spot_mode, cvd_futures_mode, oi_mode):
     """
     Triggered every 10s (auto-refresh) or on any control change.
     Reloads data from disk, resamples, computes CVD/OI, rebuilds figure.
@@ -558,6 +574,7 @@ def update_chart(_, interval_str, spot_selected, futures_selected, show_pivots_v
         show_pivots=bool(show_pivots_val),
         pivot_left=pivot_lb  or PIVOT_WINDOW,
         pivot_right=pivot_rb or PIVOT_WINDOW,
+        pivot_lbt=pivot_lbt  or 3,
         cvd_spot_mode=cvd_spot_mode    or "line",
         cvd_futures_mode=cvd_futures_mode or "candle",
         oi_mode=oi_mode                or "candle",
